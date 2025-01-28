@@ -1,19 +1,27 @@
+import asyncio
+import os
 import socket
+import sys
 
-# Define the path to your Unix socket file
-socket_path = '/tmp/binance_manager.sock'
+async def connect_to_unix_socket(socket_path: str):
+    reader, writer = await asyncio.open_unix_connection(socket_path)
+    print("Connected to the Unix socket.", socket_path)
+    start_time = asyncio.get_event_loop().time()
+    while True:
+        data = await reader.readline()
+        if not data:
+            print("No more data received?")
+            break
+        print(f"{int((asyncio.get_event_loop().time() - start_time)*1e3)} {data.decode()}")
+        
 
-# Create a Unix socket
-client_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+async def main():
+    if len(sys.argv) < 2:
+        print("Please provide the Unix socket path as the first argument.")
+        sys.exit(1)
 
-try:
-    # Connect to the Unix socket
-    client_socket.connect(socket_path)
+    socket_path = sys.argv[1]
+    await connect_to_unix_socket(socket_path)
 
-    # Receive data from the socket (adjust the buffer size if needed)
-    data = client_socket.recv(1024)
-    print(f"Received: {data.decode('utf-8')}")
-
-finally:
-    # Close the socket
-    client_socket.close()
+if __name__ == "__main__":
+    asyncio.run(main())

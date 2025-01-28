@@ -1,191 +1,267 @@
-use std::{collections::{HashMap, HashSet}, env};
+use std::{collections::HashMap, env, sync::Arc};
 
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
-use tokio::{net::{UnixListener, UnixStream}, select, sync::mpsc, time::{sleep, Duration}};
+use serde::Serialize;
+use tokio::{net::UnixListener, select, sync::{broadcast, mpsc, oneshot, RwLock}, task::JoinHandle, time::{self, sleep, Duration}};
 use futures::{ SinkExt, StreamExt };
 use tokio_tungstenite::tungstenite::Message;
+use thiserror::Error;
+// use tracing;
 
-use crate::exchanges::Exchange;
 
-async fn websocket_connection(exchange: Exchange, url: &str, pairs: Vec<String>, messages: mpsc::Sender<ExchangePairMessage>) {
-    loop {
-        // Connect to the websocket
-        let ws_stream = match tokio_tungstenite::connect_async(url).await {
-            Ok((stream, _)) => stream,
-            Err(err) => {
-                eprintln!("Failed to connect to websocket: {}. Retrying in 5 seconds...", err);
-                sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-        let (mut write, mut read) = ws_stream.split();
+use crate::exchanges::{binance::{}, exchange::{ExchangeName, WebsocketApi}, manager::ExchangeManager};
 
-        // What we do after connecting will depend on the exchange
-        match exchange {
-            Exchange::Binance => {
-                // Send the subscription message
-                let subscription_message = create_binance_subscription_message(&pairs);
-                if let Err(err) = write.send(Message::from(subscription_message)).await {
-                    eprintln!("Failed to send subscription message: {}", err);
-                    sleep(Duration::from_secs(5)).await;
-                    continue;
-                }
-            }
-            _ => {}
-        }
+// type PairPriceSender = (String, mpsc::Sender<Price>);
 
-        // Read messages from the websocket
-        while let Some(message) = read.next().await {
-            match message {
-            Ok(Message::Text(text)) => {
-                if let Ok(pair_message) = ExchangePairMessage::try_from((exchange.clone(), text.as_str())) {
-                    if let Err(err) = messages.send(pair_message).await {
-                        eprintln!("Error sending message to channel: {}", err);
-                        break;
-                    }
-                } else {
-                    eprintln!("Failed to parse message: {}", text);
-                }
-            }
-            Ok(_) => {}
-            Err(err) => {
-                eprintln!("Error reading message from websocket: {}", err);
-                break;
-            }
-            }
+// async fn websocket_connection<'a, T>(exchange: &'a T, url: &str, mut new_pairs: mpsc::Receiver<PairPriceSender>) 
+// where   T: WebsocketApi + 'a + ?Sized,
+//         ExchangeName: From<&'a T>
+// {
+//     let registry: RwLock<HashMap<String, mpsc::Sender<Price>>> = RwLock::new(HashMap::new());
+//     let (write_to_socket_sender, mut write_to_socket_receiver) = mpsc::channel::<Message>(128);
+//     select! {
+//         _ = async {
+//             while let Some((pair, sender)) = new_pairs.recv().await {
+//                 registry.write().await.insert(pair.clone(), sender);
+//                 if let Err(_) = exchange.on_pair_added(&pair, &write_to_socket_sender).await { break;}; // Here we only send via the channel, so any error isn't related to the websocket connection - it's the channel itself and that needs to be interrupted entirely
+//             }
+//         } => {
+//             log::error!("Pair channel terminated");
+//         }
+//         _ = async {
+//             'full: loop {
+//                 // A strange idea, allows us to "continue" early but still wait before reconnect at the end. This should be replaced with a simple function
+//                 'connection_attempt: for _ in 0..1 {
+//                     // Connect to the websocket
+//                     let ws_stream = match tokio_tungstenite::connect_async(url).await {
+//                         Ok((stream, _)) => stream,
+//                         Err(err) => {
+//                             log::error!("Failed to connect to websocket {}: {}. Retrying in 5 seconds...", url, err);
+//                             break 'connection_attempt;
+//                         }
+//                     };
+//                     let (mut write, mut read) = ws_stream.split();
+            
+//                     log::info!("Connected to websocket {}", url);
+//                     let pairs = registry.read().await;
+//                     let pairs = pairs.keys().collect::<Vec<&String>>();
+//                     // What we do after connecting will depend on the exchange
+//                     match exchange.after_connection(&pairs, &mut write).await {
+//                         Ok(_) => {}
+//                         Err(ExchangeApiError::DropConnectionError(e)) => {
+//                             log::error!("Failed to process after connection: {}. Reconnecting", e);
+//                             break 'connection_attempt;
+//                         }
+//                         Err(ExchangeApiError::DropExchangeError(e)) => {
+//                             log::error!("Failed to process after connection: {}. Exiting exchange", e);
+//                             break 'full;
+//                         }
+//                     }
+                    
+//                     let last_pong = RwLock::new(tokio::time::Instant::now());
+//                     let mut pong_check_interval = time::interval(Duration::from_secs(5));
+//                     // Read messages from the websocket and write to them when instructed. Also keep track of pings/pongs to detect disconnects
+//                     'single_connection: loop {
+//                         select! {
+//                             _ = async {
+//                                 while let Some(message) = read.next().await {
+//                                     match message {
+//                                         Ok(Message::Text(text)) => {
+//                                             if let Ok(pair_message) = ExchangePairMessage::try_from((ExchangeName::from(&exchange), text.as_str())) {
+//                                                 if let Some(channel) = registry.read().await.get(&pair_message.pair) {
+//                                                     if let Err(err) = channel.send(pair_message.price).await {
+//                                                         log::error!("Error sending message to channel: {}", err);
+//                                                         break;  // if the internal channel is closed, we should close the connection entirely TODO
+//                                                     }
+//                                                 } else {
+//                                                     log::error!("Received message for unregistered pair: {}", pair_message.pair);
+//                                                 }
+//                                             } else {
+//                                                 log::warn!("Failed to parse message: {}", text);
+//                                             }
+//                                         }
+//                                         Ok(Message::Ping(ping)) => {
+//                                             if let Err(err) = write_to_socket_sender.send(Message::Pong(ping)).await {
+//                                                 log::error!("Failed to send pong: {}", err);
+//                                                 break;
+//                                             };
+//                                         }
+//                                         Ok(Message::Pong(_)) => {
+//                                             log::trace!("Received pong");
+//                                             let mut last_pong = last_pong.write().await;
+//                                             *last_pong = tokio::time::Instant::now();
+//                                         }
+//                                         Ok(other) => {
+//                                             dbg!(other);
+//                                             log::warn!("Received non-text message from websocket");
+//                                         }
+//                                         Err(err) => {
+//                                             log::error!("Error reading message from websocket: {}", err);
+//                                             break;
+//                                         }
+//                                     }
+//                                 }
+//                             } => {
+//                                 log::error!("Websocket read terminated");
+//                                 break 'single_connection;
+//                             }
+//                             _ = async {
+//                                 while let Some(message) = write_to_socket_receiver.recv().await {
+//                                     if let Err(err) = write.send(message).await {
+//                                         log::error!("Failed to send message to websocket: {}", err);
+//                                         break;
+//                                     }
+//                                 }
+//                             } => {
+//                                 log::error!("Write to socket terminated");
+//                                 break 'single_connection;
+//                             }
+//                             _ = async {
+//                                 loop {
+//                                     pong_check_interval.tick().await;
+//                                     let last_pong = last_pong.read().await;
+//                                     if tokio::time::Instant::now() - *last_pong > Duration::from_secs(10) {
+//                                         log::warn!("Pong check failed, closing connection. Last pong was {:?}", *last_pong);
+//                                         break;
+//                                     }
+//                                     if let Err(err) = write_to_socket_sender.send(Message::Ping("".into())).await {
+//                                         log::error!("Failed to send ping: {}", err);
+//                                         break;  // TODO this is internal channel failure, this should close this entire manager
+//                                     }
+//                                 }
+//                             } => {
+//                                 log::error!("Pong check terminated");
+//                                 break 'single_connection;
+//                             }
+//                         }
+//                     }
+//                 }
+//                 sleep(Duration::from_secs(7)).await;
+//             }
+//         } => {
+//             eprintln!("Websocket connection terminated");
+//         }
+//     }
+    
+// }
+
+// #[derive(Debug)]
+// struct PairManager {
+//     task_handle: Option<JoinHandle<()>>,
+// }
+
+// #[derive(Error, Debug)]
+// pub enum PairError {
+//     #[error("Channel send error: {0}")]
+//     ChannelSendError(String),
+
+//     #[error("Other error: {0}")]
+//     ParsingError(String),
+// }
+
+// impl From<serde_json::Error> for PairError {
+//     fn from(err: serde_json::Error) -> Self {
+//         PairError::ParsingError(err.to_string())
+//     }
+// }
+// impl From<broadcast::error::SendError<String>> for PairError {
+//     fn from(err: broadcast::error::SendError<String>) -> Self {
+//         PairError::ChannelSendError(err.to_string())
+//     }
+// }
+
+// impl PairManager {
+//     fn new(exchange_name: String, pair: String, mut from_exchange_messages: mpsc::Receiver<Price>) -> Self {
+//         let socket_path = format!("/tmp/{}_{}.sock", exchange_name, pair.replace("/", "_"));
+//         log::info!("Creating socket at {}", socket_path);
+//         if std::path::Path::new(&socket_path).exists() {
+//             std::fs::remove_file(&socket_path).expect("Failed to remove existing socket file");
+//         }
+//         let mut socket = UnixListener::bind(socket_path).expect("Failed to bind socket");
+//         let th = tokio::spawn(async move {
+//             let (to_sockets_messages_sender, mut to_sockets_messages_receiver) = broadcast::channel::<String>(1024);
+//             let current_value = RwLock::new(None);
+//             select! {
+//                 // Doing the below branch just to keep the receiver from being dropped, which would close the channel. It also allows us to keep the current value in the RwLock which can be used for new unix socket connections
+//                 _ = async {
+//                     while let Ok(message) = to_sockets_messages_receiver.recv().await {
+//                         log::trace!("Received message inside broadcast channel: {:?}", message);
+//                         let mut current_value = current_value.write().await;
+//                         *current_value = Some(message);
+//                     }
+//                 } => {
+//                     log::error!("Broadcast channel terminated");
+//                 }
+//                 _ = accept_connections(&mut socket, to_sockets_messages_sender.clone(), &current_value) => {
+//                     log::error!("Accept connections terminated");
+//                 }
+//                 _ = async {
+//                     let mut latest_price: Option<Price> = None;
+//                     while let Some(message) = from_exchange_messages.recv().await {
+//                         log::debug!("Received message inside pair manager: {:?}", message);
+//                         // Avoid sending the same message twice
+//                         if let Some(ref latest_price) = latest_price {
+//                             if latest_price == &message {
+//                                 continue;
+//                             }
+//                         }
+//                         latest_price = Some(message.clone());
+
+//                         match {
+//                             let message: String = serde_json::to_string(&message)?;
+//                             to_sockets_messages_sender.send(message)?;
+//                             Ok::<(), PairError>(())
+//                         } {
+//                             Err(PairError::ChannelSendError(err)) => {
+//                                 log::error!("Failed to send message to socket: {}", err);
+//                                 break;
+//                             }
+//                             Err(PairError::ParsingError(err)) => {
+//                                 log::warn!("Failed to parse message: {}", err);
+//                             }
+//                             _ => {
+//                                 log::debug!("Message sent to socket");
+//                             }
+//                         };
+//                     }
+//                     Ok::<(), PairError>(())
+//                 } => {
+//                     log::error!("Connection channel terminated");
+//                 }
+//             }
+//         });
+//         Self {
+//             task_handle: th.into(),
+//         }
+//     }
+// }
+
+
+
+// pub async fn run_public_websocket(mut channel: mpsc::Receiver<(Exchange, String)>) -> () {
+//     let mut managers: HashMap<Exchange, ExchangeManager> = HashMap::new();
+    
+//     while let Some((exchange, pair)) = channel.recv().await {
+//         log::info!("Public socket received pair: {:?} - {}", exchange, pair);
+//         if let Some(manager) = managers.get_mut(&exchange) {
+//             log::info!("Adding pair to existing manager {:?}", exchange);
+//             manager.add_pair(pair).await;
+//         } else {
+//             log::info!("Manager not found for exchange {:?}, creating", exchange);
+//             let mut new_manager = ExchangeManager::new(exchange.clone()).await;
+//             new_manager.add_pair(pair).await;
+//             managers.insert(exchange.clone(), new_manager);
+//         };
+//     }
+// }
+
+
+pub async fn run(pairs_receiver: mpsc::Receiver<(ExchangeName, String)>) {
+    let mut manager = ExchangeManager::new();
+    log::info!("Manager created");
+    select! {
+        _ = manager.run(pairs_receiver) => {
+            log::error!("Manager terminated");
         }
     }
 }
-
-struct ExchangeManager {
-    exchange: Exchange,
-    socket: UnixListener,
-    pairs: HashSet<String>,
-}
-
-impl ExchangeManager {
-    async fn new(exchange: Exchange) -> Self {
-        // Shoud depend on the exchange
-        let websocket_url = env::var("PUBLIC_WEBSOCKET").unwrap_or_else(|_| "wss://data-stream.binance.vision".to_string());
-        Self {
-            exchange,
-            socket: UnixListener::bind("/tmp/binance_manager.sock").unwrap(),
-            pairs: HashSet::new(),
-        }
-    }
-
-    async fn run(&mut self) {
-        let (messages_sender, mut messages_receiver) = mpsc::channel::<ExchangePairMessage>(32);
-        let pairs = self.pairs.iter().cloned().collect::<Vec<String>>();
-        let pairs = vec!("btcusdt".to_string());
-        let exchange = self.exchange.clone();
-        let url = env::var("PUBLIC_WEBSOCKET").unwrap_or_else(|_| "wss://data-stream.binance.vision".to_string());
-        loop {
-            select! {
-                Ok((stream, _)) = self.socket.accept() => {
-                    while let Some(message) = messages_receiver.recv().await {
-                        if let Ok(message) = serde_json::to_string(&message) {
-                            if let Err(err) = stream.try_write(message.as_bytes()) {
-                                eprintln!("Failed to write to socket: {}", err);
-                                break;
-                            }
-                        } else {
-                            eprintln!("Failed to serialize message");
-                        }
-                    }
-                }
-                // TODO we don't need exchange anymore here. Pairs however should be a channel
-                _ = websocket_connection(exchange.clone(), &url, pairs.clone(), messages_sender.clone()) => {
-                    eprintln!("Websocket connection terminated");
-                }
-                message = messages_receiver.recv() => {
-                    if let Some(message) = message {
-                        println!("Received message: {:?}", message);
-                        
-                    } else {
-                        eprintln!("Failed to receive message");
-                        continue;
-                    }
-                },
-            }
-        }
-    }
-}
-
-pub async fn run_public_websocket(mut pairs_channel: mpsc::Receiver<String>) -> () {
-    let mut binance_manager = ExchangeManager::new(Exchange::Binance).await;
-    // For now we only support a single websocket connection
-    let (messages_sender, mut messages_receiver) = mpsc::channel::<ExchangePairMessage>(32);
-
-    loop {
-        select! {
-            _ = binance_manager.run() => {
-                eprintln!("Binance manager terminated");
-            },
-        }
-    }
-}
-
-fn create_binance_subscription_message(pairs: &Vec<String>) -> String {
-    let channels = pairs.iter().map(|pair| format!(r#""{}@bookTicker""#, pair)).collect::<Vec<String>>().join(", ");
-    format!(r#"{{"method": "SUBSCRIBE", "params": [{}]}}"#, channels)
-}
-
-#[derive(Debug, Serialize)]
-pub struct PairPrice {
-    pair: String,
-    ask: Decimal,
-    bid: Decimal,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ExchangePairMessage {
-    exchange: Exchange,
-    price: PairPrice,
-}
-
-#[derive(Debug, Deserialize)]
-struct BinancePairMessage {
-    #[serde(rename = "s")]
-    pair: String,
-    #[serde(rename = "a")]
-    ask: Decimal,
-    #[serde(rename = "b")]
-    bid: Decimal,
-}
-
-impl TryFrom<Result<BinancePairMessage, serde_json::Error>> for PairPrice {
-    type Error = ();
-    fn try_from(value: Result<BinancePairMessage, serde_json::Error>) -> Result<Self, Self::Error> {
-        if let Ok(value) = value {
-            Ok(PairPrice {
-                pair: value.pair,
-                ask: value.ask,
-                bid: value.bid,
-            })
-        } else {
-            Err(())
-        }
-    }
-}
-
-
-impl TryFrom<(Exchange, &str)> for ExchangePairMessage {
-    type Error = ();
-    fn try_from((exchange, message): (Exchange, &str)) -> Result<Self, Self::Error> {
-        let price = match exchange {
-            Exchange::Binance => serde_json::from_str::<BinancePairMessage>(message).try_into(),
-            _ => unimplemented!(),
-        };
-        if let Ok(price) = price {
-            Ok(ExchangePairMessage {
-                exchange,
-                price,
-            })
-        } else {
-            Err(())
-        }
-    }
-}
-
