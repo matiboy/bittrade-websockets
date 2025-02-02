@@ -61,16 +61,17 @@ impl ExchangeManager {
                 log::error!("Pair receiver terminated");
             }
             _ = async {
-                let mut i = 0.;
+                #[allow(unused_variables)]  // This is a temporary loop to send fake messages
+                let mut i = 0.; 
                 loop {
                     sleep(Duration::from_secs(1)).await;
                     i += 0.1;
-                    sender.send(ExchangePairPrice {
-                        exchange: ExchangeName::Binance,
-                        pair: "XRP_USDT".to_owned(),
-                        ask: i,
-                        bid: 0.2,
-                    }).expect("Failed to send message");
+                    // sender.send(ExchangePairPrice {
+                    //     exchange: ExchangeName::Binance,
+                    //     pair: "XRP_USDT".to_owned(),
+                    //     ask: i,
+                    //     bid: 0.2,
+                    // }).expect("Failed to send message");
                 }
             } => {
                 log::error!("Pair price sender terminated");

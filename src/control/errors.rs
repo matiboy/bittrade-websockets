@@ -1,5 +1,3 @@
-use core::error;
-
 use thiserror::Error;
 use tokio::{io, sync::{broadcast, mpsc}};
 
@@ -16,7 +14,6 @@ pub enum ControlError {
     #[error("Channel send error: {0}")]
     SendErrorBroadcast(#[from] broadcast::error::SendError<String>),
     
-    
     #[error("Channel send error: {0}")]
     SendErrorMpsc(#[from] mpsc::error::SendError<String>),
     
@@ -28,4 +25,7 @@ pub enum ControlError {
 
     #[error("Failed to connect to socket: {1}; IO error: {0}")]
     SocketConnectionError(io::Error, String),
+
+    #[error("Unexpected control listener loop termination: {0}")]
+    ListenToControlError(String),
 }

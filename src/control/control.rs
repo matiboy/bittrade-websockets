@@ -26,23 +26,175 @@
 /// through Unix domain sockets. It provides a way to send commands such as adding trading pairs, adding API keys,
 /// and removing API keys to the service.
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
-use tokio::{io::{self, AsyncReadExt, AsyncWriteExt}, net::UnixListener, sync::{broadcast, mpsc}};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::UnixListener, select, sync::{mpsc, Mutex}};
 use cliclack::{input, select};
 use tokio::net::UnixStream;
 use bincode;
 
 use crate::exchanges::exchange::{ExchangeName, BINANCE, BITFINEX, COINBASE, INDEPENDENT_RESERVE, KRAKEN, MEXC, WHITEBIT};
-use std::env;
+use std::{env, sync::Arc};
 
 use super::errors::ControlError;
 
+
+pub async fn listen_to_control(pairs_sender: mpsc::Sender<(ExchangeName, String)>, account_sender: mpsc::Sender<String>) -> Result<(), ControlError> {
+    let (fatal_sender, mut fatal_receiver) = mpsc::channel::<ControlError>(1);
+    select! {
+        // The regular control connection loop; not expected to return
+        _ = async {
+            // TODO: Handle listener error properly here
+            let listener = get_listener().await.expect("Failed to get listener");
+            loop {
+                if let Err(err) = control_connection(&listener, pairs_sender.clone(), account_sender.clone(), fatal_sender.clone()).await {
+                    log::error!("Control connection error {}", err);
+                }
+            }
+        } => {
+            log::error!("Control connection loop died");
+            Err(ControlError::ListenToControlError("Control connection loop died".to_owned()))
+        },
+        // In case of a fatal error, this will break the select! and thus propagate to the main function
+        Some(err) = fatal_receiver.recv() => {
+            log::error!("Fatal error in control listener: {}", err);
+            Err(ControlError::ListenToControlError(err.to_string()))
+        }
+    }
+}
+
+async fn control_connection(listener: &UnixListener, pairs_sender: mpsc::Sender<(ExchangeName, String)>, _account_sender: mpsc::Sender<String>, outcome_sender: mpsc::Sender<ControlError>) -> Result<(), ControlError> {
+    let (stream, _) = listener.accept().await?;
+    // tokio::spawn requires 'static lifetime, so we need to clone the stream and wrap it in Arc<Mutex>
+    let stream = Arc::new(Mutex::new(stream));
+    // We need to spawn so that we don't block other incoming connections
+    tokio::spawn(async move {
+    loop {
+        let stream = stream.clone();
+        match parse_control_command(stream).await {
+            Ok(command) => {
+                log::info!("Received command: {:?}", command);
+                match command {
+                    ControlCommand::AddPair(exchange, pair) => {
+                        if let Err(err) = pairs_sender.send((exchange, pair)).await {
+                            log::error!("Failed to send pair: {}", err);
+                            // At this stage, our internal channel for adding pairs has failed so if the outcome sender which bubbles that information also fails, we're in so much trouble that using expect seems fine.
+                            outcome_sender.send(ControlError::SendPairErrorMpsc(err)).await.expect("Failed to send error");
+                        }
+                    }
+                    ControlCommand::AddKey(pair, key) => {
+                        log::info!("Adding key: {} to pair: {}", key, pair);
+                        // account_sender.send(format!("{}:{}", pair, key)).await?;
+                    }
+                    ControlCommand::RemoveKey(key) => {
+                        log::info!("Removing key: {}", key);
+                        // account_sender.send(key).await?;
+                    }
+                }
+            }
+            Err(ControlError::Io(err)) => {
+                log::warn!("IO error: {}; broken connection", err);
+                break;
+            }
+            Err(err) => {
+                log::warn!("Error parsing command: {}", err);
+            }
+        }
+    }
+    });
+    Ok(())
+}
+
+const PAIR_SEPARATOR: char = '_';
+
+pub async fn prompt() -> Result<PromptResult, ControlError> {
+    // After first loop where we attempt to get the command from the command line arguments, we will clear "args" and just keep prompting the user, unless this is a serve command
+    let mut args: Vec<String> = env::args().collect();
+    // After first loop we will also stop offering "serve" as an option
+    let mut action_options = [("serve", "Serve", ""), ("add_pair", "Add pair", ""), ("add_key", "Add key", ""), ("remove_key", "Remove key", "")].to_vec();
+    let mut is_first_loop = true;
+    let mut stream = get_stream().await?;
+    loop {
+        let action = match args.get(1) {
+            Some(action) => action.to_owned(),
+            None => {
+                select("Select action:")
+                .items(&action_options)
+                .initial_value("add_pair")
+                .interact()?.into()
+            }
+        };
+        // Serve action is final, we don't need to prompt the user for any more commands
+        if action == "serve" {
+            return Ok(PromptResult::Serve(get_socket_path()));
+        }
+        // Clear the args vector so we can prompt the user for the action and arguments next time
+        args = Vec::new();
+        // Also remove the serve option from the list of options
+        if is_first_loop {
+            action_options.retain(|(key, _, _)| *key != "serve");
+            is_first_loop = false;
+        }
+        match action.as_str() {
+        "add_pair" => {
+            let exchange: &str = if args.len() > 1 {
+                let ex: &str = args[2].as_str();
+                match ex {
+                BINANCE | WHITEBIT | KRAKEN | BITFINEX | MEXC | COINBASE | INDEPENDENT_RESERVE => {
+                    ex
+                }
+                _ => {
+                    log::error!("Invalid exchange: {}", ex);
+                    continue;
+                }
+                }
+            } else {
+                select("Select exchange:")
+                .items(&[(BINANCE, "Binance", ""), (WHITEBIT, "Whitebit", ""), (KRAKEN, "Kraken", ""), (BITFINEX, "Bitfinex", ""), (MEXC, "Mexc", ""), (COINBASE, "Coinbase", ""), (INDEPENDENT_RESERVE, "Independent Reserve", "")])
+                .initial_value(BINANCE)
+                .interact()?.into()
+            };
+            let pair = if args.len() > 2 {
+                args[3].to_owned()
+            } else {
+                input("Enter pair:")
+                .default_input("BTC_USDT")
+                .validate(|input: &String| if input.is_empty() { Err("Please provide pair.") } else if input.len() == 7 || input.len() == 8 && input.chars().nth(3) == Some(PAIR_SEPARATOR) && input.split(PAIR_SEPARATOR).all(|part| part.len() == 3 || part.len() == 4) {
+                    Ok(())
+                } else {
+                    Err("Please provide a valid pair in the form BTC_USDT (all caps, with underscore in the middle).")
+                })
+                .interact()?
+            };
+            
+            // Send on the pairs channel
+            let command = ControlCommand::AddPair(exchange.into(), pair);
+            if let Err(err) = send_to_socket(&command, &mut stream).await.map(|_| command) {
+                log::error!("Failed to send command: {}", err);
+            }
+        }
+        "add_key" => {
+            log::error!("Add key not implemented yet");
+        }
+        "remove_key" => {
+            log::error!("Remove key not implemented yet");
+        }
+        _ => {
+            log::error!("Unknown action: {}", action);
+        }
+        }
+    }
+}
+
+
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ControlCommand {
-    Serve(String),
     AddPair(ExchangeName, String),             // Add pair command with an exchange and a single pair string
     AddKey(String, String),      // Add key command with two strings
     RemoveKey(String),           // Remove key command with one string
+}
+
+pub enum PromptResult {
+    Serve(String),
+    Exit,
 }
 
 fn get_socket_path() -> String {
@@ -63,95 +215,6 @@ pub async fn get_listener() -> Result<UnixListener, std::io::Error> {
     UnixListener::bind(socket_path)
 }
 
-pub async fn parse_control_command(mut stream: UnixStream) -> Result<ControlCommand, ControlError> {
-    // Read the length of the incoming message (first 4 bytes)
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-
-    // Read the serialized command data
-    let mut buf = vec![0; len];
-    stream.read_exact(&mut buf).await?;
-
-    // Deserialize the command using bincode
-    let command: ControlCommand = bincode::deserialize(&buf)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-    Ok(command)
-}
-
-
-pub async fn prompt() -> Result<ControlCommand, ControlError> {
-    loop {
-        // After first loop where we attempt to get the command from the command line arguments, we will clear "args" and just keep prompting the user, unless this is a serve command
-        let mut args: Vec<String> = env::args().collect();
-        let action = match args.get(1) {
-            Some(action) => action.to_owned(),
-            None => {
-                select("Select action:")
-                .items(&[("serve", "Serve", ""), ("add_pair", "Add pair", ""), ("add_key", "Add key", ""), ("remove_key", "Remove key", "")])
-                .initial_value("add_pair")
-                .interact()?.into()
-            }
-        };
-        // Serve action is final, we don't need to prompt the user for any more commands
-        if action == "serve" {
-            return Ok(ControlCommand::Serve(get_socket_path()));
-        }
-        // Clear the args vector so we can prompt the user for the action and arguments next time
-        args = Vec::new();
-        let action = action.as_str();
-        let mut stream = get_stream().await?;
-        match action {
-            "add_pair" => {
-                let exchange: &str = if args.len() > 1 {
-                    let ex: &str = &args[2];
-                    match ex {
-                        BINANCE | WHITEBIT | KRAKEN | BITFINEX | MEXC | COINBASE | INDEPENDENT_RESERVE => {
-                            ex
-                        }
-                        _ => {
-                            log::error!("Invalid exchange: {}", ex);
-                            continue;
-                        }
-                    }
-                } else {
-                    select("Select exchange:")
-                    .items(&[(BINANCE, "Binance", ""), (WHITEBIT, "Whitebit", ""), (KRAKEN, "Kraken", ""), (BITFINEX, "Bitfinex", ""), (MEXC, "Mexc", ""), (COINBASE, "Coinbase", ""), (INDEPENDENT_RESERVE, "Independent Reserve", "")])
-                    .initial_value(BINANCE)
-                    .interact()?.into()
-                };
-                let pair = if args.len() > 2 {
-                    args[3].to_owned()
-                } else {
-                    input("Enter pair:")
-                    .default_input("BTC_USDT")
-                    .validate(|input: &String| if input.is_empty() { Err("Please provide pair.") } else if input.len() == 7 || input.len() == 8 && input.chars().nth(3) == Some('/') && input.split('_').all(|part| part.len() == 3 || part.len() == 4) {
-                        Ok(())
-                    } else {
-                        Err("Please provide a valid pair in the form BTC_USDT (all caps, with slash in the middle).")
-                    })
-                    .interact()?
-                };
-                
-                // Send on the pairs channel
-                let command = ControlCommand::AddPair(exchange.into(), pair);
-                if let Err(err) = send_to_socket(&command, &mut stream).await.map(|_| command) {
-                    log::error!("Failed to send command: {}", err);
-                }
-            }
-            "add_key" => {
-                log::error!("Add key not implemented yet");
-            }
-            "remove_key" => {
-                log::error!("Remove key not implemented yet");
-            }
-            _ => {
-                log::error!("Unknown action: {}", action);
-            }
-        }
-    }
-}
 
 async fn send_to_socket(command: &ControlCommand, stream: &mut UnixStream) -> Result<(), ControlError> {
     let serialized_command = bincode::serialize(command).expect("Failed to serialize");
@@ -168,41 +231,20 @@ async fn send_to_socket(command: &ControlCommand, stream: &mut UnixStream) -> Re
 
 
 
-pub async fn listen_to_control(pairs_sender: mpsc::Sender<(ExchangeName, String)>, account_sender: mpsc::Sender<String>) -> Result<(), ControlError> {
-    let listener = get_listener().await?;
+pub async fn parse_control_command(stream: Arc<Mutex<UnixStream>>) -> Result<ControlCommand, ControlError> {
+    // Read the length of the incoming message (first 4 bytes)
+    let mut len_buf = [0u8; 4];
+    let mut stream = stream.lock().await;
+    stream.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
 
-    // NOTE or TODO: This means we block to a single client connection? And each client connection can only send a single command?
-    loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                match parse_control_command(stream).await {
-                    Ok(command) => {
-                        log::info!("Received command: {:?}", command);
-                        match command {
-                            ControlCommand::AddPair(exchange, pair) => {
-                                pairs_sender.send((exchange, pair)).await?;
-                            }
-                            ControlCommand::AddKey(pair, key) => {
-                                log::info!("Adding key: {} to pair: {}", key, pair);
-                                account_sender.send(format!("{}:{}", pair, key)).await?;
-                            }
-                            ControlCommand::RemoveKey(key) => {
-                                log::info!("Removing key: {}", key);
-                                account_sender.send(key).await?;
-                            }
-                            _ => {
-                                log::debug!("Command does not require action: {:?}", command);
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        log::error!("Error parsing command: {}", err);
-                    }
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to accept connection: {}", e);
-            }
-        }
-    }
+    // Read the serialized command data
+    let mut buf = vec![0; len];
+    stream.read_exact(&mut buf).await?;
+
+    // Deserialize the command using bincode
+    let command: ControlCommand = bincode::deserialize(&buf)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    Ok(command)
 }

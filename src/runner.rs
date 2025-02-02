@@ -11,8 +11,6 @@ use thiserror::Error;
 
 use crate::exchanges::{binance::{}, exchange::{ExchangeName, WebsocketApi}, manager::ExchangeManager};
 
-// type PairPriceSender = (String, mpsc::Sender<Price>);
-
 // async fn websocket_connection<'a, T>(exchange: &'a T, url: &str, mut new_pairs: mpsc::Receiver<PairPriceSender>) 
 // where   T: WebsocketApi + 'a + ?Sized,
 //         ExchangeName: From<&'a T>

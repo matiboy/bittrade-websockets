@@ -8,36 +8,34 @@ mod runner;
 mod errors;
 mod exchanges;
 mod unix_socket;
-use control::control::{listen_to_control, prompt, ControlCommand};
+use control::control::{listen_to_control, prompt, ControlCommand, PromptResult};
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::protocol::frame::coding::Control;
 
 
 #[tokio::main]
 async fn main() {
     // console_subscriber::init();
     env_logger::init();
-    let args: Vec<String> = env::args().collect();
 
-    if args.len() >= 1 {
-        match prompt().await {
-            Ok(ControlCommand::Serve(path)) => {
-                log::info!("Starting server at {}", path);
-            },
-            Ok(_) => {
-                log::info!("Done");
-                return;
-            }
-            Err(e) => {
-               log::error!("Failed to get command: {}", e);
-               return;
-            }, 
+    // Entry point for the program - either read the command from the command line arguments or prompt the user
+    match prompt().await {
+        // Only the serve command requires the programme to continue
+        Ok(PromptResult::Serve(path)) => {
+            log::info!("Starting server at {}", path);
+        },
+        Ok(_) => {
+            log::info!("Done");
+            return;
         }
+        Err(e) => {
+            log::error!("Failed to get command: {}", e);
+            return;
+        }, 
     }
 
     // This is used to communicate to the main server that a new Exchange/Pair is expected to be added to the list of watched exchange/pairs
     let (pairs_sender, pairs_receiver) = mpsc::channel::<(ExchangeName, String)>(32);
-    // This is used to communicate to the main server that a new account key is expected to be added to the list of watched account keys/secrets
+    // This is used to communicate to the main server that a new account key is expected to be added to the list of watched account keys/secrets - Not implemented yet
     let (account_sender, _) = mpsc::channel::<String>(32);
 
     let manager_task = tokio::spawn(run(pairs_receiver));
@@ -46,7 +44,7 @@ async fn main() {
     pairs_sender.send((ExchangeName::Binance, "XRP_USDT".to_owned())).await.expect("Failed to send pair");
 
     select! {
-        // Listens to control commands sent via the unix websocket like adding new pairs or account keys
+        // Listens to control commands sent via the unix domain socket like adding new pairs or account keys
         _ = listen_to_control(pairs_sender, account_sender) => {
             log::error!("Control listener failed");
         },
