@@ -85,7 +85,7 @@ async fn accept_connections(socket: UnixListener, to_sockets_messages_sender: &b
                 });
             }
             Err(err) => {
-                eprintln!("Failed to accept connection: {}", err);
+                log::warn!("Failed to accept connection: {}", err);
             }
         }
     }

@@ -23,6 +23,7 @@ pub struct ExchangeManager {
 impl ExchangeManager {
     pub fn new() -> Self {
         let (from_exchanges_pair_price_sender, from_exchanges_pair_price_receiver) = broadcast::channel(1024);
+        // TODO Looks like we are keeping the receiver around for the lifetime of the manager, just so it doesn't get dropped while there is no other receiver (before pairs get added); is this the right way to do it?
         Self {
             binance: None,
             from_exchanges_pair_price_sender,
@@ -32,9 +33,8 @@ impl ExchangeManager {
     }
 
     pub async fn run(&mut self, mut pairs_receiver: mpsc::Receiver<(ExchangeName, String)>) {
-        // Temporarily sending fake messages to check whether our Unix socket side works
-        let sender = self.from_exchanges_pair_price_sender.clone();
         log::info!("Starting manager");
+        // TODO Here we're using a select! because we will be expecting to receive api keys and pairs from the control channel
         select! {
             _ = async {
                 loop {
@@ -45,22 +45,6 @@ impl ExchangeManager {
                 }
             } => {
                 log::error!("Pair receiver terminated");
-            }
-            _ = async {
-                #[allow(unused_variables)]  // This is a temporary loop to send fake messages
-                let mut i = 0.; 
-                loop {
-                    sleep(Duration::from_secs(1)).await;
-                    i += 0.1;
-                    // sender.send(ExchangePairPrice {
-                    //     exchange: ExchangeName::Binance,
-                    //     pair: "XRP_USDT".to_owned(),
-                    //     ask: i,
-                    //     bid: 0.2,
-                    // }).expect("Failed to send message");
-                }
-            } => {
-                log::error!("Pair price sender terminated");
             }
         }
         
@@ -102,8 +86,8 @@ impl ExchangeManager {
                     log::info!("Unix socket listener died");
                 }
                 _ = async {
+                    let mut last_value = (0., 0.);
                     loop {
-                        let mut last_value = (0., 0.);
                         if let Ok(pair_price) = manager_receiver.recv().await {
                             // We match on the pair sent by the exchange, ...
                             if pair_price.exchange == exchange_name && pair_price.pair == matching_pair && (pair_price.ask, pair_price.bid) != last_value {

@@ -1,4 +1,4 @@
-use serde::de::{self, Deserialize, Deserializer};
+use serde::de::{self, Deserializer};
 
 pub fn deserialize_f64_from_string<'de, D>(deserializer: D) -> Result<f64, D::Error>
 where
