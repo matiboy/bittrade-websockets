@@ -4,7 +4,7 @@ use tokio::{select, sync::{broadcast, mpsc, oneshot}, time::sleep};
 
 use crate::unix_socket::{create_socket, UnixSocketError};
 
-use super::{exchange::{ExchangeName, GenericExchange, HasPairs}, messages::ExchangePairPrice};
+use super::{exchange::ExchangeName, messages::ExchangePairPrice};
 use super::binance::BinanceExchange;
 
 #[derive(Debug)]
@@ -14,7 +14,7 @@ struct ExchangePairHandler {
 
 #[derive(Debug)]
 pub struct ExchangeManager {
-    binance: Option<GenericExchange<BinanceExchange>>,
+    binance: Option<BinanceExchange>,
     from_exchanges_pair_price_sender: broadcast::Sender<ExchangePairPrice>,
     from_exchanges_pair_price_receiver: broadcast::Receiver<ExchangePairPrice>,
     unix_sockets: HashMap<(ExchangeName, String), ExchangePairHandler>,
@@ -31,20 +31,6 @@ impl ExchangeManager {
         }
     }
 
-    // fn get_matching_pair(&self, pair: &str) -> String {
-    //     match self.exchange {
-    //         Exchange::Binance => pair.to_uppercase().replace("/", "").replace("_", ""),
-    //         _ => unimplemented!(),
-    //     }
-    // }
-    
-    fn get_exchange(&self, exchange: &ExchangeName) -> Option<&GenericExchange<BinanceExchange>> {
-        match exchange {
-            ExchangeName::Binance => self.binance.as_ref(),
-            _ => unimplemented!(),
-        }
-    }
-
     pub async fn run(&mut self, mut pairs_receiver: mpsc::Receiver<(ExchangeName, String)>) {
         // Temporarily sending fake messages to check whether our Unix socket side works
         let sender = self.from_exchanges_pair_price_sender.clone();
@@ -53,7 +39,7 @@ impl ExchangeManager {
             _ = async {
                 loop {
                     if let Some((exchange, pair)) = pairs_receiver.recv().await {
-                        log::info!("Received pair: {}", pair);
+                        log::info!("Received pair for exchange: {exchange} {pair}");
                         self.add_pair(exchange, pair).await;
                     }
                 }
@@ -84,9 +70,18 @@ impl ExchangeManager {
         if self.unix_sockets.contains_key(&(exchange_name.clone(), pair.clone())) {
             return;
         }
-        let mut exchange = self.get_exchange(&exchange_name);
-        // let exchange: &mut GenericExchange<_> = exchange.get_or_insert(GenericExchange::new(BinanceExchange::new()));
-        // exchange.add_pair(&pair).await;
+        // Initially the exchanges are None and we only create them when we need to add a pair
+        // TODO Is this the right way to look at it? Should we create the exchanges when we start the manager? And they can decide for themselves whether to run their websocket(s) or not
+        match exchange_name {
+            ExchangeName::Binance => {
+                let exchange = self.binance.get_or_insert(BinanceExchange::new(self.from_exchanges_pair_price_sender.clone()));
+                exchange.add_pair(&pair).await;
+            }
+            _ => {
+                log::error!("Exchange not implemented");
+            }
+        }
+        
         // TODO we need to wrap this in a loop so that if either the channel or the unix listener dies, we can restart it
         // but for now, focus on getting something running
         let (stop_sender, stop_receiver) = oneshot::channel();
@@ -107,8 +102,11 @@ impl ExchangeManager {
                     loop {
                         if let Ok(pair_price) = manager_receiver.recv().await {
                             if pair_price.exchange == exchange_name && pair_price.pair == pair {
-                                log::info!("Received pair price: {:?}", pair_price);
-                                tx.send(format!("{},{}", pair_price.ask, pair_price.bid)).expect("Failed to send message");
+                                log::debug!("Received pair price: {:?}", pair_price);
+                                // TODO we might need to differentiate between the different types of errors, failing to serialize is not the same issue as failing to send on the channel
+                                if let Err(err) = serde_json::to_string(&pair_price).map(|s| tx.send(s + "\n")) {
+                                    log::warn!("Failed to serialize pair price: {err}");
+                                }
                             }
                         }   
                     }
@@ -120,15 +118,17 @@ impl ExchangeManager {
     }
 }
 
+
 fn get_socket_name(exchange_name: &ExchangeName, pair: &String) -> String {
-    let base_folder = std::env::var("UNIX_SOCKET_BASE_PATH").unwrap_or_else(|_| env::temp_dir().to_str().unwrap().to_owned());
-    format!("{}/{}_{}.sock", base_folder, String::from(exchange_name), pair)
+    let base_folder = std::env::var("UNIX_SOCKET_BASE_PATH")
+    .map_or_else(|_| "/tmp/".to_owned(), |s| if s.ends_with('/') { s } else { format!("{}/", s) });
+    format!("{base_folder}{exchange_name}_{pair}.sock")
 }
 
 async fn create_unix_socket_listener(path: &String, stop: oneshot::Receiver<()>, tx: &broadcast::Sender<String>, rx: &mut broadcast::Receiver<String>) {
     select! {
         _ = stop => {
-            log::info!("Received stop signal");
+            log::info!("Received stop signal for socket on path {path}");
         },
         _ = async {
             loop {
