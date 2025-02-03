@@ -111,7 +111,7 @@ pub async fn prompt() -> Result<PromptResult, ControlError> {
     // After first loop we will also stop offering "serve" as an option
     let mut action_options = [("serve", "Serve", ""), ("add_pair", "Add pair", ""), ("add_key", "Add key", ""), ("remove_key", "Remove key", "")].to_vec();
     let mut is_first_loop = true;
-    let mut stream = get_stream().await?;
+    let mut stream = None;
     loop {
         let action = match args.get(1) {
             Some(action) => action.to_owned(),
@@ -126,6 +126,7 @@ pub async fn prompt() -> Result<PromptResult, ControlError> {
         if action == "serve" {
             return Ok(PromptResult::Serve(get_socket_path()));
         }
+        let stream = stream.get_or_insert(get_stream().await?);
         // Clear the args vector so we can prompt the user for the action and arguments next time
         args = Vec::new();
         // Also remove the serve option from the list of options
@@ -167,7 +168,7 @@ pub async fn prompt() -> Result<PromptResult, ControlError> {
             
             // Send on the pairs channel
             let command = ControlCommand::AddPair(exchange.into(), pair);
-            if let Err(err) = send_to_socket(&command, &mut stream).await.map(|_| command) {
+            if let Err(err) = send_to_socket(&command, stream).await.map(|_| command) {
                 log::error!("Failed to send command: {}", err);
             }
         }
