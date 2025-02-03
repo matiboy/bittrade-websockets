@@ -72,15 +72,18 @@ impl ExchangeManager {
         }
         // Initially the exchanges are None and we only create them when we need to add a pair
         // TODO Is this the right way to look at it? Should we create the exchanges when we start the manager? And they can decide for themselves whether to run their websocket(s) or not
-        match exchange_name {
+        // TODO Binance currently can return the matching pair but other exchanges might not be so simple
+        let matching_pair = match exchange_name {
             ExchangeName::Binance => {
                 let exchange = self.binance.get_or_insert(BinanceExchange::new(self.from_exchanges_pair_price_sender.clone()));
-                exchange.add_pair(&pair).await;
+                // We want to know what pair will actually be sent by the exchange as it won't be the same as the one we requested e.g. BTC_USDT will become BTCUSDT
+                exchange.add_pair(&pair).await
             }
             _ => {
                 log::error!("Exchange not implemented");
+                "".to_owned()
             }
-        }
+        };
         
         // TODO we need to wrap this in a loop so that if either the channel or the unix listener dies, we can restart it
         // but for now, focus on getting something running
@@ -101,7 +104,11 @@ impl ExchangeManager {
                 _ = async {
                     loop {
                         if let Ok(pair_price) = manager_receiver.recv().await {
-                            if pair_price.exchange == exchange_name && pair_price.pair == pair {
+                            // We match on the pair sent by the exchange, ...
+                            if pair_price.exchange == exchange_name && pair_price.pair == matching_pair {
+                                // ... but then we modify it back to what we had requested
+                                let mut pair_price = pair_price;
+                                pair_price.pair = pair.clone();
                                 log::debug!("Received pair price: {:?}", pair_price);
                                 // TODO we might need to differentiate between the different types of errors, failing to serialize is not the same issue as failing to send on the channel
                                 if let Err(err) = serde_json::to_string(&pair_price).map(|s| tx.send(s + "\n")) {

@@ -1,5 +1,5 @@
 mod errors;
-
+mod deserializer;
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use errors::WebsocketConnectionError;
@@ -11,7 +11,7 @@ use tokio::{net::TcpStream, select, sync::{broadcast, mpsc, RwLock}, time::{self
 use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 use crate::exchanges::{errors::ExchangeApiError, exchange::BINANCE, messages::ExchangePairPrice};
-
+use deserializer::deserialize_f64_from_string;
 // use super::exchange::{ExchangeName, ExchangeApi};
 
 
@@ -19,9 +19,9 @@ use crate::exchanges::{errors::ExchangeApiError, exchange::BINANCE, messages::Ex
 struct BinancePairMessage {
     #[serde(rename = "s")]
     pair: String,
-    #[serde(rename = "a")]
+    #[serde(rename = "a", deserialize_with = "deserialize_f64_from_string")]
     ask: f64,
-    #[serde(rename = "b")]
+    #[serde(rename = "b", deserialize_with = "deserialize_f64_from_string")]
     bid: f64,
 }
 
@@ -33,18 +33,18 @@ struct BinanceSubscriptionMessage {
 }
 
 pub fn create_binance_subscription_message(pairs: &HashSet<String>) -> String {
-    let channels = pairs.iter().map(|pair| format!(r#""{}@bookTicker""#, pair))
+    let channels = pairs.iter().map(|pair| format!("{}@bookTicker", pair.to_lowercase()))
         .collect::<Vec<String>>();
     let message = BinanceSubscriptionMessage {
         method: "SUBSCRIBE".to_owned(),
         params: channels,
     };
+    dbg!(serde_json::to_string(&message).unwrap());
     serde_json::to_string(&message).expect("Failed to serialize subscription message")
 }
 
 #[derive(Debug)]
 pub struct BinanceExchange {
-    pairs: HashSet<String>,
     public_websocket_handle: tokio::task::JoinHandle<()>,
     new_pairs_sender: mpsc::Sender<String>,
 }
@@ -80,17 +80,17 @@ impl BinanceExchange {
             }
         });
         Self {
-            pairs: HashSet::new(),
             public_websocket_handle,
             new_pairs_sender,
         }
     }
 
-    pub async fn add_pair(&mut self, pair: &String) {
-        self.pairs.insert(pair.clone());
+    pub async fn add_pair(&mut self, pair: &String) -> String {
+        let pair = pair.replace("_", "");
         if let Err(err) = self.new_pairs_sender.send(pair.clone()).await {
             log::error!("Failed to send pair to websocket: {}", err);
         }
+        pair
     }
 }
 
@@ -113,9 +113,14 @@ async fn websocket_connection(url: &str, mut new_pairs: mpsc::Receiver<String>, 
     let pairs_registry: RwLock<HashSet<String>> = RwLock::new(HashSet::new());
     // This channel will be used to send messages to the websocket connection, for example when we want to subscribe/unsubscribe to a pair
     let (write_to_socket_sender, mut write_to_socket_receiver) = mpsc::channel::<Message>(32);
+    // TODO stop the websocket when no pairs and start it only after 1 pairs
     select! {
         _ = async {
             while let Some(new_pair) = new_pairs.recv().await {
+                if pairs_registry.read().await.contains(&new_pair) {
+                    log::info!("Pair already exists in websocket: {}", new_pair);
+                    continue;
+                }
                 log::info!("Adding pair to websocket: {}", new_pair);
                 // @neil Do you know whether the write lock is released right after this line? Or do I need to wrap with a block?
                 pairs_registry.write().await.insert(new_pair.clone());
@@ -166,7 +171,6 @@ async fn single_websocket_connection(url: &str, registry: &RwLock<HashSet<String
     let last_pong = RwLock::new(tokio::time::Instant::now());
     let mut pong_check_interval = time::interval(Duration::from_secs(5));
     // Read messages from the websocket and write to them when instructed. Also keep track of pings/pongs to detect disconnects
-    // TODO not seeing the case where this select would terminate, everything is a loop unless it's a return Err
     select! {
         _ = async {
             loop {
@@ -179,13 +183,16 @@ async fn single_websocket_connection(url: &str, registry: &RwLock<HashSet<String
                             continue;
                         }
                         // Even here, when/if we ever decide to implement other channels, they all come with an "e" tag, but the bookTicker channel doesn't
-                        if let Ok(pair_message) = serde_json::from_str::<BinancePairMessage>(&text) {
-                            if let Err(err) = messages_to_exchange_sender.send(pair_message).await {
-                                log::error!("Error sending message to channel: {}", err);
-                                break;  // if the internal channel is closed, we should close the connection entirely TODO
+                        match serde_json::from_str::<BinancePairMessage>(&text) {
+                            Ok(pair_message) => {
+                                if let Err(err) = messages_to_exchange_sender.send(pair_message).await {
+                                    log::error!("Error sending message to channel: {err}");
+                                    break;  // if the internal channel is closed, we should close the connection entirely TODO
+                                }
                             }
-                        } else {
-                            log::warn!("Failed to parse message: {}", text);
+                            Err(err) => {
+                                log::warn!("Failed to parse message: {text}, {err}");
+                            }
                         }
                     }
                     Ok(Message::Ping(ping)) => {
@@ -249,3 +256,4 @@ async fn single_websocket_connection(url: &str, registry: &RwLock<HashSet<String
         }
     }
 }
+
