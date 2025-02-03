@@ -12,7 +12,7 @@
             "cwd": "${workspaceFolder}",
             "env": {
                 "RUST_BACKTRACE": "1",
-                "RUST_LOG": "debug",
+                "RUST_LOG": "info",
             },
             "args": ["serve"],
             "preLaunchTask": "cargo build",

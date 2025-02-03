@@ -41,7 +41,7 @@ async fn main() {
     let manager_task = tokio::spawn(run(pairs_receiver));
 
     // For dev purposes
-    pairs_sender.send((ExchangeName::Binance, "XRP_USDT".to_owned())).await.expect("Failed to send pair");
+    // pairs_sender.send((ExchangeName::Binance, "XRP_USDT".to_owned())).await.expect("Failed to send pair");
 
     select! {
         // Listens to control commands sent via the unix domain socket like adding new pairs or account keys

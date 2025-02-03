@@ -68,6 +68,7 @@ async fn control_connection(listener: &UnixListener, pairs_sender: mpsc::Sender<
     // We need to spawn so that we don't block other incoming connections
     tokio::spawn(async move {
     loop {
+        // TODO we still seem to be dropping the connection (see log showing IO error)
         let stream = stream.clone();
         match parse_control_command(stream).await {
             Ok(command) => {
@@ -158,10 +159,8 @@ pub async fn prompt() -> Result<PromptResult, ControlError> {
             } else {
                 input("Enter pair:")
                 .default_input("BTC_USDT")
-                .validate(|input: &String| if input.is_empty() { Err("Please provide pair.") } else if input.len() == 7 || input.len() == 8 && input.chars().nth(3) == Some(PAIR_SEPARATOR) && input.split(PAIR_SEPARATOR).all(|part| part.len() == 3 || part.len() == 4) {
+                .validate(|input: &String| if input.is_empty() { Err("Please provide pair.") } else {
                     Ok(())
-                } else {
-                    Err("Please provide a valid pair in the form BTC_USDT (all caps, with underscore in the middle).")
                 })
                 .interact()?
             };
@@ -170,6 +169,7 @@ pub async fn prompt() -> Result<PromptResult, ControlError> {
             let command = ControlCommand::AddPair(exchange.into(), pair);
             if let Err(err) = send_to_socket(&command, stream).await.map(|_| command) {
                 log::error!("Failed to send command: {}", err);
+                return Err(ControlError::ListenToControlError(err.to_string()));
             }
         }
         "add_key" => {

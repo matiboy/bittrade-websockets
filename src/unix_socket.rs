@@ -55,8 +55,7 @@ async fn accept_connections(socket: UnixListener, to_sockets_messages_sender: &b
                 log::debug!("Accepted connection");
                 let mut receiver = to_sockets_messages_sender.subscribe();
                 let latest_message = current_value_rx.borrow().as_ref()
-                    .map(|s| format!("{}\n", s))
-                    .map(|s| s.into_bytes());
+                    .map(|s| s.clone().into_bytes());
                 tokio::spawn(async move {
                     if let Some(message) = latest_message {
                         if let Err(err) = stream.write_all(&message).await {
@@ -68,7 +67,6 @@ async fn accept_connections(socket: UnixListener, to_sockets_messages_sender: &b
                     loop {
                         match receiver.recv().await {
                             Ok(message) => {
-                                let message = format!("{}\n", message);
                                 log::trace!("Message being sent on unix socket: {}", message);
                                 if let Err(err) = stream.write_all(message.as_bytes()).await {
                                     log::warn!("Failed to write; Unix socket client likely disconnected");

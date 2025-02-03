@@ -52,6 +52,7 @@ impl ExchangeManager {
 
     pub async fn add_pair(&mut self, exchange_name: ExchangeName, pair: String) {
         if self.unix_sockets.contains_key(&(exchange_name.clone(), pair.clone())) {
+            log::warn!("Pair {pair} already exists for exchange {exchange_name}");
             return;
         }
         // Initially the exchanges are None and we only create them when we need to add a pair
@@ -68,6 +69,7 @@ impl ExchangeManager {
                 "".to_owned()
             }
         };
+        log::info!("Added pair {matching_pair} for exchange {exchange_name}");
         
         // TODO we need to wrap this in a loop so that if either the channel or the unix listener dies, we can restart it
         // but for now, focus on getting something running

@@ -117,16 +117,27 @@ async fn websocket_connection(url: &str, mut new_pairs: mpsc::Receiver<String>, 
     select! {
         _ = async {
             while let Some(new_pair) = new_pairs.recv().await {
+                // TODO Arguably, we don't need to check the current pairs since the manager doesn't send duplicates
                 if pairs_registry.read().await.contains(&new_pair) {
                     log::info!("Pair already exists in websocket: {}", new_pair);
                     continue;
                 }
                 log::info!("Adding pair to websocket: {}", new_pair);
-                // @neil Do you know whether the write lock is released right after this line? Or do I need to wrap with a block?
-                pairs_registry.write().await.insert(new_pair.clone());
-                let mut temp_pairs = HashSet::new();
-                temp_pairs.insert(new_pair.clone());
-                write_to_socket_sender.send(Message::Text(create_binance_subscription_message(&temp_pairs).into())).await.expect("Failed to send subscription message");
+                // TODO This is where it all currently breaks!!! We actually receive the new pair twice and only get past the next line once, meaning we don't release the lock.
+                {
+                    pairs_registry.write().await.insert(new_pair.clone());
+                }
+                log::info!("Pair added to registry: {}", new_pair);
+                let temp_pairs = HashSet::from([new_pair.clone()]);
+                match write_to_socket_sender.send(Message::Text(create_binance_subscription_message(&temp_pairs).into())).await {
+                    Ok(_) => {
+                        log::info!("Sent subscription message for pair: {}", new_pair);
+                    }
+                    Err(err) => {
+                        log::error!("Failed to send subscription message: {}", err);
+                        break;
+                    }
+                }
             }
         } => {
             log::error!("Pair channel terminated");
@@ -140,6 +151,9 @@ async fn websocket_connection(url: &str, mut new_pairs: mpsc::Receiver<String>, 
                         log::warn!("Failed to connection to websocket, retrying in 5 seconds {err}");
                         sleep(Duration::from_secs(5)).await;
                     }
+                    Err(WebsocketConnectionError::PongError()) => {
+                        log::warn!("Pong error, retrying immediately");
+                    }
                     Err(_) => {
                         log::error!("Dropping exchange");
                         break;
@@ -147,7 +161,7 @@ async fn websocket_connection(url: &str, mut new_pairs: mpsc::Receiver<String>, 
                 }
             }
         } => {
-            eprintln!("Websocket connection terminated");
+            log::error!("Websocket connection terminated");
         }
     }
     
@@ -155,6 +169,7 @@ async fn websocket_connection(url: &str, mut new_pairs: mpsc::Receiver<String>, 
 
 async fn after_connection(pairs: &HashSet<String>, write: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>) -> Result<(), WebsocketConnectionError> {
     let subscription_message = create_binance_subscription_message(&pairs);
+    log::info!("On connection, sending subscription message: {}", subscription_message);
     write.send(Message::Text(subscription_message.into())).await.map_err(|err| WebsocketConnectionError::SubscriptionError(err.to_string()))
 }
 
@@ -201,7 +216,7 @@ async fn single_websocket_connection(url: &str, registry: &RwLock<HashSet<String
                             break;
                         };
                     }
-                    // This happens in response to pongs we send ourselves
+                    // This happens in response to pings we send ourselves
                     Ok(Message::Pong(_)) => {
                         let now = tokio::time::Instant::now();
                         log::trace!("Received pong at {now:?}");
