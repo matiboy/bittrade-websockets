@@ -103,9 +103,11 @@ impl ExchangeManager {
                 }
                 _ = async {
                     loop {
+                        let mut last_value = (0., 0.);
                         if let Ok(pair_price) = manager_receiver.recv().await {
                             // We match on the pair sent by the exchange, ...
-                            if pair_price.exchange == exchange_name && pair_price.pair == matching_pair {
+                            if pair_price.exchange == exchange_name && pair_price.pair == matching_pair && (pair_price.ask, pair_price.bid) != last_value {
+                                last_value = (pair_price.ask, pair_price.bid);
                                 // ... but then we modify it back to what we had requested
                                 let mut pair_price = pair_price;
                                 pair_price.pair = pair.clone();
