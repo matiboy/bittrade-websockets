@@ -59,7 +59,7 @@ impl ExchangeManager {
         // TODO Binance currently can return the matching pair but other exchanges might not be so simple
         let matching_pair = match exchange_name {
             ExchangeName::Binance => {
-                let exchange = self.binance.get_or_insert(BinanceExchange::new(self.from_exchanges_pair_price_sender.clone()));
+                let exchange = self.binance.get_or_insert_with(|| BinanceExchange::new(self.from_exchanges_pair_price_sender.clone()));
                 // We want to know what pair will actually be sent by the exchange as it won't be the same as the one we requested e.g. BTC_USDT will become BTCUSDT
                 exchange.add_pair(&pair).await
             }
@@ -78,6 +78,7 @@ impl ExchangeManager {
         };
         self.unix_sockets.insert((exchange_name.clone(), pair.clone()), handler);
         let mut manager_receiver = self.from_exchanges_pair_price_sender.subscribe();
+        // TODO we should keep this task handler around so we can abort it when needed
         tokio::spawn(async move {
             let path = get_socket_name(&exchange_name, &pair);
             let (tx, mut rx) = broadcast::channel::<String>(32);
