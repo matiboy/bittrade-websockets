@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 use tokio::{select, sync::{broadcast, mpsc, oneshot}, time::sleep};
 
@@ -47,7 +47,6 @@ impl ExchangeManager {
                 log::error!("Pair receiver terminated");
             }
         }
-        
     }
 
     pub async fn add_pair(&mut self, exchange_name: ExchangeName, pair: String) {

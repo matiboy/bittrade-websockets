@@ -117,17 +117,23 @@ async fn websocket_connection(url: &str, mut new_pairs: mpsc::Receiver<String>, 
     select! {
         _ = async {
             while let Some(new_pair) = new_pairs.recv().await {
-                // TODO Arguably, we don't need to check the current pairs since the manager doesn't send duplicates
-                if pairs_registry.read().await.contains(&new_pair) {
-                    log::info!("Pair already exists in websocket: {}", new_pair);
-                    continue;
-                }
-                log::info!("Adding pair to websocket: {}", new_pair);
-                // TODO This is where it all currently breaks!!! We actually receive the new pair twice and only get past the next line once, meaning we don't release the lock.
+                let is_first_pair;
                 {
-                    pairs_registry.write().await.insert(new_pair.clone());
+                    let current_pairs = pairs_registry.read().await;
+                    is_first_pair = current_pairs.len() == 0;
+                }
+                log::info!("[BINANCE] Adding pair to websocket: {new_pair}");
+                // TODO This is where it all currently breaks!!! We don't seem to be releasing the lock. Question mark?
+                {
+                    let mut reg = pairs_registry.write().await;
+                    log::warn!("Got lock");
+                    (*reg).insert(new_pair.clone());
+                    log::warn!("Released lock");
                 }
                 log::info!("Pair added to registry: {}", new_pair);
+                if is_first_pair {
+                    continue;
+                }
                 let temp_pairs = HashSet::from([new_pair.clone()]);
                 match write_to_socket_sender.send(Message::Text(create_binance_subscription_message(&temp_pairs).into())).await {
                     Ok(_) => {
@@ -147,16 +153,16 @@ async fn websocket_connection(url: &str, mut new_pairs: mpsc::Receiver<String>, 
                 // TODO waiting time should depend on the error we get from single websocket connection
                 match single_websocket_connection(url, &pairs_registry, &mut messages, &mut write_to_socket_receiver, write_to_socket_sender.clone()).await {
                     Ok(_) => {}
-                    Err(WebsocketConnectionError::ConnectionError(err)) => {
-                        log::warn!("Failed to connection to websocket, retrying in 5 seconds {err}");
-                        sleep(Duration::from_secs(5)).await;
+                    Err(WebsocketConnectionError::ChannelClosed()) => {
+                        log::error!("Channel closed, this is fatal. Dropping exchange");
+                        break;
                     }
                     Err(WebsocketConnectionError::PongError()) => {
                         log::warn!("Pong error, retrying immediately");
                     }
-                    Err(_) => {
-                        log::error!("Dropping exchange");
-                        break;
+                    Err(err) => {
+                        log::warn!("Failed to connection to websocket, retrying in 5 seconds {err}");
+                        sleep(Duration::from_secs(5)).await;
                     }
                 }
             }
@@ -179,15 +185,17 @@ async fn single_websocket_connection(url: &str, registry: &RwLock<HashSet<String
     let (mut write, mut read) = ws_stream.split();
 
     log::info!("Connected to websocket {}", url);
-    let pairs = registry.read().await;
+    {
+        let pairs = registry.read().await;
+        after_connection(&pairs, &mut write).await?;
+    }
     // What we do after connecting will depend on the exchange
-    after_connection(&pairs, &mut write).await?;
     
     let last_pong = RwLock::new(tokio::time::Instant::now());
     let mut pong_check_interval = time::interval(Duration::from_secs(5));
     // Read messages from the websocket and write to them when instructed. Also keep track of pings/pongs to detect disconnects
     select! {
-        _ = async {
+        err = async {
             loop {
                 if let Some(message) = read.next().await {
                 match message {
@@ -202,7 +210,7 @@ async fn single_websocket_connection(url: &str, registry: &RwLock<HashSet<String
                             Ok(pair_message) => {
                                 if let Err(err) = messages_to_exchange_sender.send(pair_message).await {
                                     log::error!("Error sending message to channel: {err}");
-                                    break;  // if the internal channel is closed, we should close the connection entirely TODO
+                                    break WebsocketConnectionError::ChannelClosed();
                                 }
                             }
                             Err(err) => {
@@ -213,7 +221,7 @@ async fn single_websocket_connection(url: &str, registry: &RwLock<HashSet<String
                     Ok(Message::Ping(ping)) => {
                         if let Err(err) = write_to_socket_sender.send(Message::Pong(ping)).await {
                             log::error!("Failed to send pong: {}", err);
-                            break;
+                            break WebsocketConnectionError::ChannelClosed();
                         };
                     }
                     // This happens in response to pings we send ourselves
@@ -223,20 +231,24 @@ async fn single_websocket_connection(url: &str, registry: &RwLock<HashSet<String
                         let mut last_pong = last_pong.write().await;
                         *last_pong = now;
                     }
+                    Ok(Message::Close(_)) => {
+                        // We probably don't need to do anything as the socket will get closed anyway
+                        log::warn!("Received close message from websocket");
+                    }
                     Ok(other) => {
                         dbg!(other);
                         log::warn!("Received non-text message from websocket");
                     }
                     Err(err) => {
                         log::error!("Error reading message from websocket: {}", err);
-                        break;
+                        break WebsocketConnectionError::ReadClosed(err.to_string());
                     }
                 }
             }
             }
         } => {
             log::error!("Websocket read terminated");
-            return Err(WebsocketConnectionError::ConnectionError(tokio_tungstenite::tungstenite::Error::ConnectionClosed));
+            return Err(err);
         }
         // Listen to messages that need to be forwarded to the websocket
         err = async {
