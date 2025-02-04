@@ -69,6 +69,7 @@ async fn control_connection(listener: &UnixListener, pairs_sender: mpsc::Sender<
     tokio::spawn(async move {
     loop {
         // TODO we still seem to be dropping the connection (see log showing IO error)
+        // NOTE on the above; it's actually just the get_or_insert which isn't lazy so it's creating a new stream every time and dropping it immediately
         let stream = stream.clone();
         match parse_control_command(stream).await {
             Ok(command) => {

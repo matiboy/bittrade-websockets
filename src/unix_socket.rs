@@ -1,3 +1,4 @@
+use tokio::net::UnixStream;
 use tokio::select;
 use tokio::sync::watch;
 use tokio::{net::UnixListener, sync::broadcast};
@@ -37,11 +38,14 @@ async fn keep_latest_value(to_sockets_messages_receiver: &mut broadcast::Receive
     loop {
         match to_sockets_messages_receiver.recv().await {
             Ok(message) => {
-                log::debug!("Received message: {}", message);
+                log::trace!("Received message: {}", message);
                 current_value_tx.send(Some(message)).expect("Failed to send message");
             }
-            Err(err) => {
-                log::error!("Error receiving message: {}", err);
+            Err(broadcast::error::RecvError::Lagged(err)) => {
+                log::error!("Lag in broadcasting message: {err}");
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                log::error!("Channel closed");
                 break;
             }
         }
@@ -51,41 +55,49 @@ async fn keep_latest_value(to_sockets_messages_receiver: &mut broadcast::Receive
 async fn accept_connections(socket: UnixListener, to_sockets_messages_sender: &broadcast::Sender<String>, current_value_rx: watch::Receiver<Option<String>>) {
     loop {
         match socket.accept().await {
-            Ok((mut stream, _)) => {
-                log::debug!("Accepted connection");
-                let mut receiver = to_sockets_messages_sender.subscribe();
-                let latest_message = current_value_rx.borrow().as_ref()
-                    .map(|s| s.clone().into_bytes());
-                tokio::spawn(async move {
-                    if let Some(message) = latest_message {
-                        if let Err(err) = stream.write_all(&message).await {
-                            log::warn!("Failed to write; Unix socket client likely disconnected");
-                            log::debug!("Failed to write to socket: {}", err);
-                            return;
-                        }
-                    }
-                    loop {
-                        match receiver.recv().await {
-                            Ok(message) => {
-                                log::trace!("Message being sent on unix socket: {}", message);
-                                if let Err(err) = stream.write_all(message.as_bytes()).await {
-                                    log::warn!("Failed to write; Unix socket client likely disconnected");
-                                    log::debug!("Failed to write to socket: {}", err);
-                                    break;
-                                }
-                            }
-                            Err(err) => {
-                                log::error!("Error receiving message: {}", err);
-                                break;
-                            }
-                        } 
-                    }
-                });
+            Ok((stream, _)) => {
+                handle_single_connection(stream, to_sockets_messages_sender, &current_value_rx).await;
             }
             Err(err) => {
                 log::warn!("Failed to accept connection: {}", err);
             }
         }
+    }
+}
+
+async fn handle_single_connection(mut stream: UnixStream, to_sockets_messages_sender: &broadcast::Sender<String>, current_value_rx: &watch::Receiver<Option<String>>) {
+    log::debug!("Accepted connection");
+    let mut receiver = to_sockets_messages_sender.subscribe();
+    let latest_message = current_value_rx.borrow().as_ref()
+        .map(|s| s.clone().into_bytes());
+    tokio::spawn(async move {
+        if let Some(message) = latest_message {
+            if let Err(err) = stream.write_all(&message).await {
+                log::warn!("Failed to write; Unix socket client likely disconnected");
+                log::debug!("Failed to write to socket: {}", err);
+                return;
+            }
+        }
+        handle_connection_messages(&mut stream, &mut receiver).await;
+    });
+}
+
+async fn handle_connection_messages(stream: &mut UnixStream, receiver: &mut broadcast::Receiver<String>) {
+    loop {
+        match receiver.recv().await {
+            Ok(message) => {
+                log::trace!("Message being sent on unix socket: {}", message);
+                if let Err(err) = stream.write_all(message.as_bytes()).await {
+                    log::warn!("Failed to write; Unix socket client likely disconnected");
+                    log::debug!("Failed to write to socket: {}", err);
+                    break;
+                }
+            }
+            Err(err) => {
+                log::error!("Error receiving message: {}", err);
+                break;
+            }
+        } 
     }
 }
 
