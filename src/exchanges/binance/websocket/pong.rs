@@ -7,6 +7,7 @@ use crate::exchanges::binance::errors::WebsocketConnectionError;
 
 
 pub async fn pong_check_interval_task(pong_check_interval: &mut time::Interval, last_pong: &RwLock<tokio::time::Instant>, write_to_socket_sender: &mpsc::Sender<Message>) -> WebsocketConnectionError {
+    // Note: we could have pong_check_interval internal to this function but that would make it harder to test
     loop {
         pong_check_interval.tick().await;
         let last_pong = last_pong.read().await;
@@ -46,6 +47,38 @@ mod tests {
         assert!(matches!(message, Ok(Message::Ping(_))));
 
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_pong_check_fails_on_no_pong() {
+        let mut interval = time::interval(Duration::from_millis(50));
+        let last_pong = Arc::new(RwLock::new(Instant::now() - Duration::from_secs(11))); // Too old
+        let (tx, _) = mpsc::channel(1);
+
+        let last_pong_clone = last_pong.clone();
+        let handle = tokio::spawn(async move {
+            pong_check_interval_task(&mut interval, &last_pong_clone, &tx).await
+        });
+
+        let outcome = handle.await.unwrap();
+        assert!(matches!(outcome, WebsocketConnectionError::PongError()));
+    }
+
+    #[tokio::test]
+    async fn test_pong_check_fails_when_write_closed() {
+        let mut interval = time::interval(Duration::from_millis(50));
+        let last_pong = Arc::new(RwLock::new(Instant::now()));
+        let (tx, rx) = mpsc::channel(1);
+
+        drop(rx); // Close the receiver
+
+        let last_pong_clone = Arc::clone(&last_pong);
+        let handle = tokio::spawn(async move {
+            pong_check_interval_task(&mut interval, &last_pong_clone, &tx).await
+        });
+
+        let outcome = handle.await.unwrap();
+        assert!(matches!(outcome, WebsocketConnectionError::WriteClosed(_)));
     }
 
 }

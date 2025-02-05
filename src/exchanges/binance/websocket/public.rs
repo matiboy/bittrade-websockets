@@ -6,41 +6,24 @@ use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 use crate::exchanges::binance::{errors::WebsocketConnectionError, messages::{create_binance_subscription_message, BinancePairMessage}, websocket::pong::pong_check_interval_task};
 
-pub async fn websocket_connection(url: &str, mut new_pairs: mpsc::Receiver<String>, mut messages: mpsc::Sender<BinancePairMessage>) {
+pub async fn websocket_connection(url: &str, new_pairs: mpsc::Receiver<String>, messages: mpsc::Sender<BinancePairMessage>) {
     let pairs_registry: RwLock<HashSet<String>> = RwLock::new(HashSet::new());
     // This channel will be used to send messages to the websocket connection, for example when we want to subscribe/unsubscribe to a pair
     let (write_to_socket_sender, mut write_to_socket_receiver) = mpsc::channel::<Message>(32);
+    let mut write_to_socket_sender_clone = write_to_socket_sender.clone();
     // TODO stop the websocket when no pairs and start it only after 1 pairs
     select! {
-        _ = listen_to_pairs_channel(new_pairs, pairs_registry, write_to_socket_sender) => {
+        _ = listen_to_pairs_channel(new_pairs, &pairs_registry, &write_to_socket_sender) => {
             log::error!("Pair channel terminated");
         }
-        _ = async {
-            loop {
-                // TODO waiting time should depend on the error we get from single websocket connection
-                match single_websocket_connection(url, &pairs_registry, &mut messages, &mut write_to_socket_receiver, write_to_socket_sender.clone()).await {
-                    Ok(_) => {}
-                    Err(WebsocketConnectionError::ChannelClosed()) => {
-                        log::error!("Channel closed, this is fatal. Dropping exchange");
-                        break;
-                    }
-                    Err(WebsocketConnectionError::PongError()) => {
-                        log::warn!("Pong error, retrying immediately");
-                    }
-                    Err(err) => {
-                        log::warn!("Failed to connection to websocket, retrying in 5 seconds {err}");
-                        sleep(Duration::from_secs(5)).await;
-                    }
-                }
-            }
-        } => {
+        _ = reconnecting_websocket_connection(url, &pairs_registry, messages, &mut write_to_socket_receiver, &mut write_to_socket_sender_clone) => {
             log::error!("Websocket connection terminated");
         }
     }
     
 }
 
-async fn listen_to_pairs_channel(mut new_pairs: mpsc::Receiver<String>, pairs_registry: RwLock<HashSet<String>>, write_to_socket_sender: mpsc::Sender<Message>) {
+async fn listen_to_pairs_channel(mut new_pairs: mpsc::Receiver<String>, pairs_registry: &RwLock<HashSet<String>>, write_to_socket_sender: &mpsc::Sender<Message>) {
     while let Some(new_pair) = new_pairs.recv().await {
         let is_first_pair;
         {
@@ -85,7 +68,6 @@ async fn single_websocket_connection(url: &str, registry: &RwLock<HashSet<String
         after_connection(&pairs, &mut write).await?;
     }
     // What we do after connecting will depend on the exchange
-    
     let last_pong = RwLock::new(tokio::time::Instant::now());
     let mut pong_check_interval = time::interval(Duration::from_secs(5));
     // Read messages from the websocket and write to them when instructed. Also keep track of pings/pongs to detect disconnects
@@ -162,6 +144,25 @@ async fn single_websocket_connection(url: &str, registry: &RwLock<HashSet<String
         err = pong_check_interval_task(&mut pong_check_interval, &last_pong, &write_to_socket_sender) => {
             log::error!("Pong check terminated");
             return Err(err);
+        }
+    }
+}
+
+async fn reconnecting_websocket_connection(url: &str, pairs_registry: &RwLock<HashSet<String>>, mut messages: mpsc::Sender<BinancePairMessage>, write_to_socket_receiver: &mut mpsc::Receiver<Message>, write_to_socket_sender: &mut mpsc::Sender<Message>) -> Result<(), WebsocketConnectionError> {
+    loop {
+        match single_websocket_connection(url, &pairs_registry, &mut messages, write_to_socket_receiver, write_to_socket_sender.clone()).await {
+            Ok(_) => {}
+            Err(WebsocketConnectionError::ChannelClosed()) => {
+                log::error!("Channel closed, this is fatal. Dropping exchange");
+                break Err(WebsocketConnectionError::ChannelClosed());
+            }
+            Err(WebsocketConnectionError::PongError()) => {
+                log::warn!("Pong error, retrying immediately");
+            }
+            Err(err) => {
+                log::warn!("Failed to connection to websocket, retrying in 5 seconds {err}");
+                sleep(Duration::from_secs(5)).await;
+            }
         }
     }
 }
