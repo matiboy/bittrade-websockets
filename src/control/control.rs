@@ -128,7 +128,10 @@ pub async fn prompt() -> Result<PromptResult, ControlError> {
         if action == "serve" {
             return Ok(PromptResult::Serve(get_socket_path()));
         }
-        let stream = stream.get_or_insert(get_stream().await?);
+        if stream.is_none() {
+            stream = Some(get_stream().await?);
+        }
+        let stream = stream.as_mut().unwrap();
         // Clear the args vector so we can prompt the user for the action and arguments next time
         args = Vec::new();
         // Also remove the serve option from the list of options
@@ -160,7 +163,10 @@ pub async fn prompt() -> Result<PromptResult, ControlError> {
             } else {
                 input("Enter pair:")
                 .default_input("BTC_USDT")
-                .validate(|input: &String| if input.is_empty() { Err("Please provide pair.") } else {
+                .validate(|input: &String| if input.is_empty() { Err("Please provide pair.".to_owned()) } else if !input.contains(PAIR_SEPARATOR) {
+                    let message = format!("Pair must contain separator. {}", PAIR_SEPARATOR);
+                    Err(message)
+                } else {
                     Ok(())
                 })
                 .interact()?

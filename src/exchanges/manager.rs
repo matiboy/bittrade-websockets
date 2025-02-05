@@ -4,8 +4,7 @@ use tokio::{select, sync::{broadcast, mpsc, oneshot}, time::sleep};
 
 use crate::unix_socket::{create_socket, UnixSocketError};
 
-use super::{exchange::ExchangeName, messages::ExchangePairPrice};
-use super::binance::BinanceExchange;
+use super::{binance::BinanceExchange, exchange::ExchangeName, messages::ExchangePairPrice};
 
 #[derive(Debug)]
 struct ExchangePairHandler {
