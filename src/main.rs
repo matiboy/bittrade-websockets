@@ -1,4 +1,3 @@
-use std::env;
 use exchanges::exchange::ExchangeName;
 use runner::run;
 use tokio::select;
@@ -8,7 +7,8 @@ mod runner;
 mod errors;
 mod exchanges;
 mod unix_socket;
-use control::control::{listen_to_control, prompt, ControlCommand, PromptResult};
+mod websocket;
+use control::control::{listen_to_control, prompt, PromptResult};
 use tokio::sync::mpsc;
 
 

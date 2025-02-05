@@ -3,7 +3,7 @@ use std::time::Duration;
 use tokio::{sync::{mpsc, RwLock}, time};
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::exchanges::binance::errors::WebsocketConnectionError;
+use super::errors::WebsocketConnectionError;
 
 
 pub async fn pong_check_interval_task(pong_check_interval: &mut time::Interval, last_pong: &RwLock<tokio::time::Instant>, write_to_socket_sender: &mpsc::Sender<Message>) -> WebsocketConnectionError {
@@ -27,7 +27,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use tokio::{sync::broadcast, time::Instant};
+    use tokio::time::Instant;
 
     #[tokio::test]
     async fn test_pong_check_sends_ping() {

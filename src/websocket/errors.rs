@@ -10,9 +10,7 @@ pub enum WebsocketConnectionError {
     WriteClosed(String),
     #[error("Pong was not received from websocket")]
     PongError(),
-    #[error("Failed to send channel subscription to websocket: {0}")]
-    SubscriptionError(String),
-    #[error("Channel was closed")]
-    ChannelClosed(),
+    #[error("Internal channel {0} was closed")]
+    ChannelClosed(String),
 }
 

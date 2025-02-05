@@ -1,4 +1,3 @@
-mod errors;
 mod deserializer;
 mod messages;
 mod exchange;

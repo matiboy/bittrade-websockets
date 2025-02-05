@@ -4,7 +4,9 @@ use futures::{stream::SplitSink, SinkExt, StreamExt};
 use tokio::{net::TcpStream, select, sync::{mpsc, RwLock}, time::{self, sleep}};
 use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
-use crate::exchanges::binance::{errors::WebsocketConnectionError, messages::{create_binance_subscription_message, BinancePairMessage}, websocket::pong::pong_check_interval_task};
+use crate::exchanges::binance::messages::{create_binance_subscription_message, BinancePairMessage};
+use crate::websocket::{WebsocketConnectionError, pong_check_interval_task};
+
 
 pub async fn websocket_connection(url: &str, new_pairs: mpsc::Receiver<String>, messages: mpsc::Sender<BinancePairMessage>) {
     let pairs_registry: RwLock<HashSet<String>> = RwLock::new(HashSet::new());
@@ -54,7 +56,7 @@ async fn listen_to_pairs_channel(mut new_pairs: mpsc::Receiver<String>, pairs_re
 async fn after_connection(pairs: &HashSet<String>, write: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>) -> Result<(), WebsocketConnectionError> {
     let subscription_message = create_binance_subscription_message(&pairs);
     log::info!("On connection, sending subscription message: {}", subscription_message);
-    write.send(Message::Text(subscription_message.into())).await.map_err(|err| WebsocketConnectionError::SubscriptionError(err.to_string()))
+    write.send(Message::Text(subscription_message.into())).await.map_err(|err| WebsocketConnectionError::WriteClosed(err.to_string()))
 }
 
 // TODO this will be what we aim to generalize with hooks like "on pair added" and "exchange.after_connection"
@@ -87,7 +89,7 @@ async fn single_websocket_connection(url: &str, registry: &RwLock<HashSet<String
                             Ok(pair_message) => {
                                 if let Err(err) = messages_to_exchange_sender.send(pair_message).await {
                                     log::error!("Error sending message to channel: {err}");
-                                    break WebsocketConnectionError::ChannelClosed();
+                                    break WebsocketConnectionError::ChannelClosed("Messages to exchange channel".to_owned());
                                 }
                             }
                             Err(err) => {
@@ -98,7 +100,7 @@ async fn single_websocket_connection(url: &str, registry: &RwLock<HashSet<String
                     Ok(Message::Ping(ping)) => {
                         if let Err(err) = write_to_socket_sender.send(Message::Pong(ping)).await {
                             log::error!("Failed to send pong: {}", err);
-                            break WebsocketConnectionError::ChannelClosed();
+                            break WebsocketConnectionError::ChannelClosed("Write to socket sender".to_owned());
                         };
                     }
                     // This happens in response to pings we send ourselves
@@ -152,9 +154,9 @@ async fn reconnecting_websocket_connection(url: &str, pairs_registry: &RwLock<Ha
     loop {
         match single_websocket_connection(url, &pairs_registry, &mut messages, write_to_socket_receiver, write_to_socket_sender.clone()).await {
             Ok(_) => {}
-            Err(WebsocketConnectionError::ChannelClosed()) => {
+            Err(WebsocketConnectionError::ChannelClosed(name)) => {
                 log::error!("Channel closed, this is fatal. Dropping exchange");
-                break Err(WebsocketConnectionError::ChannelClosed());
+                break Err(WebsocketConnectionError::ChannelClosed(name));
             }
             Err(WebsocketConnectionError::PongError()) => {
                 log::warn!("Pong error, retrying immediately");
