@@ -1,6 +1,8 @@
 use exchanges::exchange::ExchangeName;
 use runner::run;
 use tokio::select;
+use control::control::{listen_to_control, prompt, PromptResult};
+use tokio::sync::mpsc;
 
 mod control;
 mod runner;
@@ -8,8 +10,7 @@ mod errors;
 mod exchanges;
 mod unix_socket;
 mod websocket;
-use control::control::{listen_to_control, prompt, PromptResult};
-use tokio::sync::mpsc;
+mod json;
 
 
 #[tokio::main]

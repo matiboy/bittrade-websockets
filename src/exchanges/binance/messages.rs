@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
-use super::deserializer::deserialize_f64_from_string;
+use crate::json::deserialize_f64_from_string;
 
 
 #[derive(Debug, Deserialize)]

@@ -59,7 +59,7 @@ async fn accept_connections(socket: UnixListener, to_sockets_messages_sender: &b
         match socket.accept().await {
             Ok((stream, _)) => {
                 // TODO should we keep these join handles and abort them on error or other termination conditions?
-                handle_single_connection(stream, to_sockets_messages_sender, &current_value_rx).await;
+                handle_single_connection(stream, to_sockets_messages_sender, &current_value_rx);
             }
             Err(err) => {
                 log::warn!("Failed to accept connection: {}", err);
@@ -68,7 +68,7 @@ async fn accept_connections(socket: UnixListener, to_sockets_messages_sender: &b
     }
 }
 
-async fn handle_single_connection(mut stream: UnixStream, to_sockets_messages_sender: &broadcast::Sender<String>, current_value_rx: &watch::Receiver<Option<String>>) {
+fn handle_single_connection(mut stream: UnixStream, to_sockets_messages_sender: &broadcast::Sender<String>, current_value_rx: &watch::Receiver<Option<String>>) {
     log::debug!("Accepted connection");
     let mut receiver = to_sockets_messages_sender.subscribe();
     let latest_message = current_value_rx.borrow().as_ref()
