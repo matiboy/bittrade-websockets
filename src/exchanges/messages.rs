@@ -1,7 +1,6 @@
 use super::exchange::ExchangeName;
 use serde::Serialize;
 
-
 #[derive(Debug, Clone, Serialize)]
 pub struct ExchangePairPrice {
     #[serde(skip)]

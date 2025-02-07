@@ -82,6 +82,10 @@ async fn control_connection(listener: &UnixListener, pairs_sender: mpsc::Sender<
                             outcome_sender.send(ControlError::SendPairErrorMpsc(err)).await.expect("Failed to send error");
                         }
                     }
+                    ControlCommand::RemovePair(exchange, pair) => {
+                        log::info!("Removing pair: {} from exchange: {}", pair, exchange);
+                        // pairs_sender.send((exchange, pair)).await?;
+                    }
                     ControlCommand::AddKey(pair, key) => {
                         log::info!("Adding key: {} to pair: {}", key, pair);
                         // account_sender.send(format!("{}:{}", pair, key)).await?;
@@ -196,6 +200,7 @@ pub async fn prompt() -> Result<PromptResult, ControlError> {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ControlCommand {
     AddPair(ExchangeName, String),             // Add pair command with an exchange and a single pair string
+    RemovePair(ExchangeName, String),             // Stop listening to a pair command
     AddKey(String, String),      // Add key command with two strings
     RemoveKey(String),           // Remove key command with one string
 }
