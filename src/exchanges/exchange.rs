@@ -86,18 +86,6 @@ impl fmt::Display for ExchangeName {
     }
 }
 
-// pub trait WebsocketApi {
-//     async fn after_connection(&self, write: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>) -> Result<(), ExchangeApiError>;
-//     fn get_default_public_url(&self) -> &str;
-//     fn get_default_private_url(&self) -> &str;
-//     async fn get_public_url(&self) -> String {
-//         env::var("PUBLIC_WEBSOCKET").unwrap_or_else(|_| self.get_default_public_url().to_string())
-//     }
-//     async fn get_private_url(&self) -> String {
-//         env::var("PRIVATE_WEBSOCKET").unwrap_or_else(|_| self.get_default_private_url().to_string())
-//     }
-// }
-
 // #[derive(Debug)]
 // pub struct GenericExchange<T> 
 // where T: HasPairs
