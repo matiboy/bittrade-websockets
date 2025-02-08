@@ -1,13 +1,5 @@
 use core::fmt;
-use std::{collections::HashMap, env, str::FromStr};
-
-use futures::stream::SplitSink;
 use serde::{Deserialize, Serialize};
-use tokio::{net::TcpStream, sync::mpsc};
-use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
-use thiserror::Error;
-
-use super::errors::ExchangeApiError;
 
 
 pub const BINANCE: &str = "binance";
@@ -85,28 +77,3 @@ impl fmt::Display for ExchangeName {
         }
     }
 }
-
-// #[derive(Debug)]
-// pub struct GenericExchange<T> 
-// where T: HasPairs
-// {
-//     specific_exchange: T,
-//     pairs: HashMap<String, i8>,
-// }
-
-// impl<T: HasPairs> GenericExchange<T> {
-//     pub fn new(specific_exchange: T) -> Self {
-//         Self {
-//             specific_exchange,
-//             pairs: HashMap::new(),
-//         }
-//     }
-//     pub async fn add_pair(&mut self, pair: &String) {
-//         if let Some(count) = self.pairs.get_mut(pair) {
-//             *count += 1;
-//         } else {
-//             self.pairs.insert(pair.clone(), 1);
-//             self.specific_exchange.add_pair(pair).await;
-//         }
-//     }
-// }

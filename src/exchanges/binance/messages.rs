@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
-use crate::json::deserialize_f64_from_string;
+use crate::{exchanges::{exchange::ExchangeName, messages::ExchangePairPrice}, json::deserialize_f64_from_string};
 
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct BinancePairMessage {
     #[serde(rename = "s")]
     pub pair: String,
@@ -12,6 +12,17 @@ pub struct BinancePairMessage {
     pub ask: f64,
     #[serde(rename = "b", deserialize_with = "deserialize_f64_from_string")]
     pub bid: f64,
+}
+
+impl From<BinancePairMessage> for ExchangePairPrice {
+    fn from(message: BinancePairMessage) -> Self {
+        ExchangePairPrice {
+            exchange: ExchangeName::Binance,
+            pair: message.pair,
+            ask: message.ask,
+            bid: message.bid,
+        }
+    }
 }
 
 
@@ -29,6 +40,5 @@ pub fn create_binance_subscription_message(pairs: &HashSet<String>) -> String {
         method: "SUBSCRIBE".to_owned(),
         params: channels,
     };
-    dbg!(serde_json::to_string(&message).unwrap());
     serde_json::to_string(&message).expect("Failed to serialize subscription message")
 }

@@ -1,33 +1,23 @@
 use std::{collections::HashMap, time::Duration};
 
-use tokio::{select, sync::{broadcast, mpsc, oneshot}, time::sleep};
+use tokio::{select, sync::{broadcast, mpsc, oneshot}, task::JoinHandle, time::sleep};
 
 use crate::unix_socket::{create_socket, UnixSocketError};
 
-use super::{binance::BinanceExchange, exchange::ExchangeName, messages::ExchangePairPrice};
+use super::{binance::BinanceExchange, exchange::{ExchangeHandler, ExchangeName}, messages::ExchangePairPrice};
 
-#[derive(Debug)]
-struct ExchangePairHandler {
-    stop_channel: oneshot::Sender<()>,
-}
 
 #[derive(Debug)]
 pub struct ExchangeManager {
-    binance: Option<BinanceExchange>,
-    from_exchanges_pair_price_sender: broadcast::Sender<ExchangePairPrice>,
-    from_exchanges_pair_price_receiver: broadcast::Receiver<ExchangePairPrice>,
-    unix_sockets: HashMap<(ExchangeName, String), ExchangePairHandler>,
+    binance: BinanceExchange,
+    price_sockets: HashMap<(ExchangeName, String), ExchangeHandler>,
 }
 
 impl ExchangeManager {
     pub fn new() -> Self {
-        let (from_exchanges_pair_price_sender, from_exchanges_pair_price_receiver) = broadcast::channel(1024);
-        // TODO Looks like we are keeping the receiver around for the lifetime of the manager, just so it doesn't get dropped while there is no other receiver (before pairs get added); is this the right way to do it?
         Self {
-            binance: None,
-            from_exchanges_pair_price_sender,
-            from_exchanges_pair_price_receiver,
-            unix_sockets: HashMap::new(),
+            binance: BinanceExchange::new(),
+            price_sockets: HashMap::new(),
         }
     }
 
@@ -49,66 +39,70 @@ impl ExchangeManager {
     }
 
     pub async fn add_pair(&mut self, exchange_name: ExchangeName, pair: String) {
-        if self.unix_sockets.contains_key(&(exchange_name.clone(), pair.clone())) {
+        if self.price_sockets.contains_key(&(exchange_name.clone(), pair.clone())) {
             log::warn!("Pair {pair} already exists for exchange {exchange_name}");
             return;
         }
         // Initially the exchanges are None and we only create them when we need to add a pair
         // TODO Is this the right way to look at it? Should we create the exchanges when we start the manager? And they can decide for themselves whether to run their websocket(s) or not
         // TODO Binance currently can return the matching pair but other exchanges might not be so simple
-        let matching_pair = match exchange_name {
+        // Create a channel that will be dedicated to this pair
+        let (messages_sender, messages_receiver) = broadcast::channel(1024);
+        match exchange_name {
             ExchangeName::Binance => {
-                let exchange = self.binance.get_or_insert_with(|| BinanceExchange::new(self.from_exchanges_pair_price_sender.clone()));
-                // We want to know what pair will actually be sent by the exchange as it won't be the same as the one we requested e.g. BTC_USDT will become BTCUSDT
-                exchange.add_pair(&pair).await
+                self.binance.add_pair(&pair, messages_sender).await;
             }
             _ => {
                 log::error!("Exchange not implemented");
-                "".to_owned()
             }
         };
         log::info!("Added pair {matching_pair} for exchange {exchange_name}");
+        let (stop_sender, stop_receiver) = oneshot::channel();
+        let handler = ExchangeHander::bridge(messages_receiver, stop_sender, stop_receiver);
         
         // TODO we need to wrap this in a loop so that if either the channel or the unix listener dies, we can restart it
         // but for now, focus on getting something running
-        let (stop_sender, stop_receiver) = oneshot::channel();
-        
+        let mut manager_receiver = self.from_exchanges_pair_price_sender.subscribe();
+        let (pair_clone, exchange_clone) = (pair.clone(), exchange_name.clone());
         let handler = ExchangePairHandler {
             stop_channel: stop_sender,
-        };
-        self.unix_sockets.insert((exchange_name.clone(), pair.clone()), handler);
-        let mut manager_receiver = self.from_exchanges_pair_price_sender.subscribe();
-        // TODO we should keep this task handler around so we can abort it when needed
-        tokio::spawn(async move {
-            let path = get_socket_name(&exchange_name, &pair);
-            let (tx, mut rx) = broadcast::channel::<String>(32);
-            select! {
-                _ = create_unix_socket_listener(&path, stop_receiver, &tx, &mut rx) => {
-                    log::info!("Unix socket listener died");
-                }
-                _ = async {
-                    let mut last_value = (0., 0.);
-                    loop {
-                        if let Ok(pair_price) = manager_receiver.recv().await {
-                            // We match on the pair sent by the exchange, ...
-                            if pair_price.exchange == exchange_name && pair_price.pair == matching_pair && (pair_price.ask, pair_price.bid) != last_value {
-                                last_value = (pair_price.ask, pair_price.bid);
-                                // ... but then we modify it back to what we had requested
-                                let mut pair_price = pair_price;
-                                pair_price.pair = pair.clone();
-                                log::debug!("Received pair price: {:?}", pair_price);
-                                // TODO we might need to differentiate between the different types of errors, failing to serialize is not the same issue as failing to send on the channel
-                                if let Err(err) = serde_json::to_string(&pair_price).map(|s| tx.send(s + "\n")) {
-                                    log::warn!("Failed to serialize pair price: {err}");
-                                }
-                            }
-                        }   
+            task: tokio::spawn(async move {
+                let path = get_socket_name(&exchange_name, &pair);
+                let (tx, mut rx) = broadcast::channel::<String>(32);
+                select! {
+                    _ = create_unix_socket_listener(&path, stop_receiver, &tx, &mut rx) => {
+                        log::info!("Unix socket listener died");
                     }
-                } => {
-                    log::info!("Manager receiver died");
+                    _ = async {
+                        let mut last_value = (0., 0.);
+                        loop {
+                            if let Ok(pair_price) = manager_receiver.recv().await {
+                                // We match on the pair sent by the exchange, ...
+                                if pair_price.exchange == exchange_name && pair_price.pair == matching_pair && (pair_price.ask, pair_price.bid) != last_value {
+                                    last_value = (pair_price.ask, pair_price.bid);
+                                    // ... but then we modify it back to what we had requested
+                                    let mut pair_price = pair_price;
+                                    pair_price.pair = pair.clone();
+                                    log::debug!("Received pair price: {:?}", pair_price);
+                                    // TODO we might need to differentiate between the different types of errors, failing to serialize is not the same issue as failing to send on the channel
+                                    if let Err(err) = serde_json::to_string(&pair_price).map(|s| tx.send(s + "\n")) {
+                                        log::warn!("Failed to serialize pair price: {err}");
+                                    }
+                                }
+                            }   
+                        }
+                    } => {
+                        log::info!("Manager receiver died");
+                    }
                 }
-            }
-        });
+            })
+        };
+        self.unix_sockets.insert((exchange_clone, pair_clone), handler);
+        
+    }
+
+    async fn remove_pair(&mut self, exchange_name: ExchangeName, pair: String) {
+        
     }
 }
 
