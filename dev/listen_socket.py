@@ -12,7 +12,7 @@ async def connect_to_unix_socket(socket_path: str):
         if not data:
             print("No more data received?")
             break
-        print(f"{data.decode()}")
+        print(f"{asyncio.get_event_loop().time() - start_time} {data.decode()}")
         
 
 async def main():

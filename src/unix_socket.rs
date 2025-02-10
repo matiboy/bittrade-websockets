@@ -91,7 +91,7 @@ async fn handle_connection_messages(stream: &mut UnixStream, receiver: &mut broa
     loop {
         match receiver.recv().await {
             Ok(message) => {
-                log::trace!("Message being sent on unix socket: {}", message);
+                log::info!("Message being sent on unix socket: {}", message);
                 if let Err(err) = stream.write_all(message.as_bytes()).await {
                     log::warn!("Failed to write; Unix socket client likely disconnected");
                     log::debug!("Failed to write to socket: {}", err);

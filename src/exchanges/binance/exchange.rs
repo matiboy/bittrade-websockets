@@ -10,8 +10,8 @@ use super::{commands::Command, messages::BinancePairMessage};
 pub struct BinanceExchange {
     public_websocket_handle: Option<tokio::task::JoinHandle<()>>,  // TODO we should not need to keep the handle anymore, the oneshot stopper should suffice
     public_websocket_interrupt: Option<oneshot::Sender<()>>,
-    pairs_sender: watch::Sender<HashMap<String, broadcast::Sender<ExchangePairPrice>>>,
-    pairs_receiver: watch::Receiver<HashMap<String, broadcast::Sender<ExchangePairPrice>>>,
+    pairs_sender: watch::Sender<HashMap<String, mpsc::Sender<ExchangePairPrice>>>,
+    pairs_receiver: watch::Receiver<HashMap<String, mpsc::Sender<ExchangePairPrice>>>,
 }
 
 impl BinanceExchange {
@@ -33,7 +33,7 @@ impl BinanceExchange {
         pair.replace("_", "")
     }
 
-    pub async fn add_pair(&mut self, pair: &String, sender: broadcast::Sender<ExchangePairPrice>) {
+    pub async fn add_pair(&mut self, pair: &String, sender: mpsc::Sender<ExchangePairPrice>) {
         let exchange_pair = self.get_exchange_matching_pair(pair);
         let mut current_pairs = self.pairs_receiver.borrow().clone();
         if current_pairs.contains_key(&exchange_pair) {
@@ -41,7 +41,7 @@ impl BinanceExchange {
             return;
         }
         // Add the pair to the list
-        current_pairs.insert(pair.clone(), sender);
+        current_pairs.insert(exchange_pair.clone(), sender);
         // TODO: We should detect this and what, recreate the exchange?
         self.pairs_sender.send(current_pairs).expect("Failed to send new pairs");
         if self.public_websocket_interrupt.is_none() {

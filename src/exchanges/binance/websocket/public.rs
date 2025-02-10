@@ -15,7 +15,7 @@ async fn after_connection(pairs: &HashSet<String>, write: &mpsc::Sender<Message>
 }
 
 // TODO this will be what we aim to generalize with hooks like "on pair added" and "exchange.after_connection"
-async fn single_websocket_connection(url: &str, registry_receiver: watch::Receiver<HashMap<String, broadcast::Sender<ExchangePairPrice>>>) -> Result<(), WebsocketConnectionError> {
+async fn single_websocket_connection(url: &str, registry_receiver: watch::Receiver<HashMap<String, mpsc::Sender<ExchangePairPrice>>>) -> Result<(), WebsocketConnectionError> {
     let (ws_stream, _) = tokio_tungstenite::connect_async(url).await?;
     let (mut write, mut read) = ws_stream.split();
     log::info!("Connected to websocket {url}");
@@ -108,36 +108,43 @@ async fn single_websocket_connection(url: &str, registry_receiver: watch::Receiv
     Err(outcome)
 }
 
-async fn pairs_to_broadcast(mut registry_receiver: watch::Receiver<HashMap<String, broadcast::Sender<ExchangePairPrice>>>, tx: broadcast::Sender<BinancePairMessage>, write_to_websocket_sender: mpsc::Sender<Message>) {
+async fn pairs_to_broadcast(mut registry_receiver: watch::Receiver<HashMap<String, mpsc::Sender<ExchangePairPrice>>>, tx: broadcast::Sender<BinancePairMessage>, write_to_websocket_sender: mpsc::Sender<Message>) {
     loop {
         // When the JoinSet is dropped in each loop, all tasks it has spawned will be aborted
-        let mut set = JoinSet::new();
         if let Ok(_) = registry_receiver.changed().await {
+            let mut set = JoinSet::new();
             let pairs = registry_receiver.borrow().clone();
             for (pair, sender) in pairs.iter() {
                 // NOTE: Binance doesn't mind that we register multiple times; if they ever do, we'll need to keep new/old value and do a diff
                 log::info!("Subscribing to pair: {}", pair);
                 let (mut rx, pair, sender) = (tx.subscribe(), pair.clone(), sender.clone());
+                log::info!("Spawned task to liste to pair: {}", pair);
                 set.spawn(async move {
+                    log::info!("Spawned task to listennn to pair: {}", pair);
                     loop {
                         match rx.recv().await {
                             Ok(m) => {
+                                log::info!("Received message from channel, attempting to match {m:?} {pair}");
+                                log::debug!("Received message from channel, attempting to match {m:?} {pair}");
                                 if m.pair == *pair {
-                                    sender.send(m.into());
+                                    let _ = sender.send(m.into()).await;
                                 }
                             },
                             Err(_) => break
                         }
                     }
+                    log::error!("Channel closed, this should not happen unless we add more pairs");
                 });
             }
             // Actually send to the websocket
             let _ = after_connection(&pairs.keys().cloned().collect(), &write_to_websocket_sender.clone()).await;
+            let o = set.join_all().await;
+            dbg!(o);
         }
     }
 }
 
-pub async fn reconnecting_websocket_connection(url: String, pairs_registry_channel_receiver: watch::Receiver<HashMap<String, broadcast::Sender<ExchangePairPrice>>>, interrupt: oneshot::Receiver<()>) -> Result<(), WebsocketConnectionError> {
+pub async fn reconnecting_websocket_connection(url: String, pairs_registry_channel_receiver: watch::Receiver<HashMap<String, mpsc::Sender<ExchangePairPrice>>>, interrupt: oneshot::Receiver<()>) -> Result<(), WebsocketConnectionError> {
     select! {
         e = async move {
             loop {

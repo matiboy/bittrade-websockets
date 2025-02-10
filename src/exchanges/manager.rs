@@ -1,10 +1,10 @@
 use std::{collections::HashMap, time::Duration};
 
-use tokio::{select, sync::{broadcast, mpsc, oneshot}, task::JoinHandle, time::sleep};
+use tokio::{select, sync::{broadcast, mpsc, oneshot}, time::sleep};
 
 use crate::unix_socket::{create_socket, UnixSocketError};
 
-use super::{binance::BinanceExchange, exchange::{ExchangeHandler, ExchangeName}, messages::ExchangePairPrice};
+use super::{binance::BinanceExchange, exchange::{ExchangeHandler, ExchangeName}};
 
 
 #[derive(Debug)]
@@ -47,7 +47,10 @@ impl ExchangeManager {
         // TODO Is this the right way to look at it? Should we create the exchanges when we start the manager? And they can decide for themselves whether to run their websocket(s) or not
         // TODO Binance currently can return the matching pair but other exchanges might not be so simple
         // Create a channel that will be dedicated to this pair
-        let (messages_sender, messages_receiver) = broadcast::channel(1024);
+        let (messages_sender, messages_receiver) = mpsc::channel(1024);
+        let path = get_socket_name(&exchange_name, &pair);
+        let handler = ExchangeHandler::bridge(path, messages_receiver).await;
+        self.price_sockets.insert((exchange_name.clone(), pair.clone()), handler);
         match exchange_name {
             ExchangeName::Binance => {
                 self.binance.add_pair(&pair, messages_sender).await;
@@ -56,48 +59,8 @@ impl ExchangeManager {
                 log::error!("Exchange not implemented");
             }
         };
-        log::info!("Added pair {matching_pair} for exchange {exchange_name}");
-        let (stop_sender, stop_receiver) = oneshot::channel();
-        let handler = ExchangeHander::bridge(messages_receiver, stop_sender, stop_receiver);
         
-        // TODO we need to wrap this in a loop so that if either the channel or the unix listener dies, we can restart it
-        // but for now, focus on getting something running
-        let mut manager_receiver = self.from_exchanges_pair_price_sender.subscribe();
-        let (pair_clone, exchange_clone) = (pair.clone(), exchange_name.clone());
-        let handler = ExchangePairHandler {
-            stop_channel: stop_sender,
-            task: tokio::spawn(async move {
-                let path = get_socket_name(&exchange_name, &pair);
-                let (tx, mut rx) = broadcast::channel::<String>(32);
-                select! {
-                    _ = create_unix_socket_listener(&path, stop_receiver, &tx, &mut rx) => {
-                        log::info!("Unix socket listener died");
-                    }
-                    _ = async {
-                        let mut last_value = (0., 0.);
-                        loop {
-                            if let Ok(pair_price) = manager_receiver.recv().await {
-                                // We match on the pair sent by the exchange, ...
-                                if pair_price.exchange == exchange_name && pair_price.pair == matching_pair && (pair_price.ask, pair_price.bid) != last_value {
-                                    last_value = (pair_price.ask, pair_price.bid);
-                                    // ... but then we modify it back to what we had requested
-                                    let mut pair_price = pair_price;
-                                    pair_price.pair = pair.clone();
-                                    log::debug!("Received pair price: {:?}", pair_price);
-                                    // TODO we might need to differentiate between the different types of errors, failing to serialize is not the same issue as failing to send on the channel
-                                    if let Err(err) = serde_json::to_string(&pair_price).map(|s| tx.send(s + "\n")) {
-                                        log::warn!("Failed to serialize pair price: {err}");
-                                    }
-                                }
-                            }   
-                        }
-                    } => {
-                        log::info!("Manager receiver died");
-                    }
-                }
-            })
-        };
-        self.unix_sockets.insert((exchange_clone, pair_clone), handler);
+        
         
     }
 
@@ -111,33 +74,4 @@ fn get_socket_name(exchange_name: &ExchangeName, pair: &String) -> String {
     let base_folder = std::env::var("UNIX_SOCKET_BASE_PATH")
     .map_or_else(|_| "/tmp/".to_owned(), |s| if s.ends_with('/') { s } else { format!("{}/", s) });
     format!("{base_folder}{exchange_name}_{pair}.sock")
-}
-
-async fn create_unix_socket_listener(path: &String, stop: oneshot::Receiver<()>, tx: &broadcast::Sender<String>, rx: &mut broadcast::Receiver<String>) {
-    select! {
-        _ = stop => {
-            log::info!("Received stop signal for socket on path {path}");
-        },
-        _ = async {
-            loop {
-                match create_socket(path, tx, rx).await {
-                    Ok(()) => {
-                        log::info!("Socket listener completed due to stop signal");
-                        break;
-                    }
-                    Err(UnixSocketError::Fatal(err)) => {
-                        log::error!("Fatal error in socket listener: {}", err);
-                        break;
-                    }
-                    Err(UnixSocketError::ConnectionError(err)) => {
-                        log::error!("Connection error in socket listener: {}; retrying", err);
-                        sleep(Duration::from_secs(1)).await;
-                    }
-                }
-            }
-        } => {
-            log::info!("Failed to receive messages from manager");
-        }
-    }
-    
 }
