@@ -5,7 +5,7 @@ use tokio::{net::TcpStream, select, sync::{broadcast, mpsc, oneshot, watch, RwLo
 use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
 
-use crate::exchanges::{binance::messages::{create_binance_subscription_message, BinancePairMessage}, messages::ExchangePairPrice};
+use crate::{channels::pair::create_pair_listener, exchanges::{binance::messages::{create_binance_subscription_message, BinancePairMessage}, messages::ExchangePairPrice}};
 use crate::websocket::{WebsocketConnectionError, pong_check_interval_task};
 
 
@@ -112,27 +112,6 @@ async fn single_websocket_connection(url: &str, registry_receiver: watch::Receiv
     Err(outcome)
 }
 
-async fn pairs_to_broadcast(mut registry_receiver: watch::Receiver<HashMap<String, mpsc::Sender<ExchangePairPrice>>>, tx: broadcast::Sender<BinancePairMessage>, write_to_websocket_sender: mpsc::Sender<Message>) {
-    // TODO actually this should be a child token coming down from manager -> exchange
-    let mut cancellation_token = CancellationToken::new();
-    loop {
-        if let Ok(_) = registry_receiver.changed().await {
-            cancellation_token.cancel();
-            cancellation_token = CancellationToken::new();
-            let pairs = registry_receiver.borrow().clone();
-            for (pair, sender) in pairs.iter() {
-                // NOTE: Binance doesn't mind that we register multiple times; if they ever do, we'll need to keep new/old value and do a diff
-                log::info!("Bridging pair: {} from Binance to manager", pair);
-                let (rx, pair, sender, cancellation_token) = (tx.subscribe(), pair.clone(), sender.clone(), cancellation_token.clone());
-                tokio::spawn(create_pair_listener(pair, rx, sender, cancellation_token));
-            }
-            // Actually send to the websocket
-            let _ = after_connection(&pairs.keys().cloned().collect(), &write_to_websocket_sender.clone()).await;
-            // let _ = set_handle.insert(tokio::spawn(set.join_all()));
-        }
-    }
-}
-
 pub async fn reconnecting_websocket_connection(url: String, pairs_registry_channel_receiver: watch::Receiver<HashMap<String, mpsc::Sender<ExchangePairPrice>>>, interrupt: oneshot::Receiver<()>) -> Result<(), WebsocketConnectionError> {
     select! {
         e = async move {
@@ -160,28 +139,28 @@ pub async fn reconnecting_websocket_connection(url: String, pairs_registry_chann
     }
 }
 
-async fn create_pair_listener(pair: String, mut rx: broadcast::Receiver<BinancePairMessage>, sender: mpsc::Sender<ExchangePairPrice>, cancellation_token: CancellationToken) -> () {
-    select! {
-        _ = cancellation_token.cancelled() => {
-            log::info!("Received cancellation token, stopping listener for pair {pair}");
-        },
-        _ = async {
-            log::info!("Spawned task to listen to pair: {}", pair);
-            loop {
-                match rx.recv().await {
-                    Ok(m) => {
-                        log::info!("Received message from channel, attempting to match {m:?} {pair}");
-                        if m.pair == *pair {
-                            let _ = sender.send(m.into()).await;
-                        }
-                    },
-                    Err(_) => break
-                }
+
+pub async fn pairs_to_broadcast(mut registry_receiver: watch::Receiver<HashMap<String, mpsc::Sender<ExchangePairPrice>>>, tx: broadcast::Sender<BinancePairMessage>, write_to_websocket_sender: mpsc::Sender<Message>) {
+    // TODO actually this should be a child token coming down from manager -> exchange
+    let mut cancellation_token = CancellationToken::new();
+    loop {
+        if let Ok(_) = registry_receiver.changed().await {
+            cancellation_token.cancel();
+            cancellation_token = CancellationToken::new();
+            let pairs = registry_receiver.borrow().clone();
+            for (pair, sender) in pairs.iter() {
+                // NOTE: Binance doesn't mind that we register multiple times; if they ever do, we'll need to keep new/old value and do a diff
+                log::info!("Bridging pair: {} from Binance to manager", pair);
+                let (rx, pair, sender, cancellation_token) = (tx.subscribe(), pair.clone(), sender.clone(), cancellation_token.clone());
+                tokio::spawn(create_pair_listener(rx, sender, cancellation_token, move |message| message.pair == pair));
             }
-            log::error!("Channel closed, this should not happen unless we add more pairs");
-        } => {}
+            // Actually send to the websocket
+            let _ = after_connection(&pairs.keys().cloned().collect(), &write_to_websocket_sender.clone()).await;
+            // let _ = set_handle.insert(tokio::spawn(set.join_all()));
+        }
     }
 }
+
 
 #[cfg(test)]
 mod tests {

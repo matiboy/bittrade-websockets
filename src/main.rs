@@ -1,8 +1,17 @@
+use std::fs::OpenOptions;
+
 use exchanges::exchange::ExchangeName;
 use runner::run;
 use tokio::select;
 use control::control::{listen_to_control, prompt, PromptResult};
 use tokio::sync::mpsc;
+use tracing::Level;
+use tracing_subscriber::{
+    prelude::*,
+    fmt,
+    layer::Layer,
+    Registry, filter
+};
 
 mod control;
 mod runner;
@@ -11,25 +20,47 @@ mod exchanges;
 mod unix_socket;
 mod websocket;
 mod json;
+mod channels;
 
 
 #[tokio::main]
 async fn main() {
-    // console_subscriber::init();
-    env_logger::init();
+    let debug_file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open("logs/log-debug.log")
+        .unwrap();
+    let subscriber = Registry::default()
+        .with(
+            // stdout layer, to view everything in the console
+            fmt::layer()
+                .compact()
+                .with_ansi(true)
+        )
+        .with(
+            // log-debug file, to log the debug
+            fmt::layer()
+                .with_ansi(false)
+                .with_file(true)
+                .with_line_number(true)
+                .with_writer(debug_file)
+                .with_filter(filter::LevelFilter::from_level(Level::DEBUG))
+        );
+    
+    tracing::subscriber::set_global_default(subscriber).unwrap();
 
     // Entry point for the program - either read the command from the command line arguments or prompt the user
     match prompt().await {
         // Only the serve command requires the programme to continue
         Ok(PromptResult::Serve(path)) => {
-            log::info!("Starting server at {}", path);
+            tracing::info!("Starting server at {}", path);
         },
         Ok(_) => {
-            log::info!("Done");
+            tracing::info!("Done");
             return;
         }
         Err(e) => {
-            log::error!("Failed to get command: {}", e);
+            tracing::error!("Failed to get command: {}", e);
             return;
         }, 
     }

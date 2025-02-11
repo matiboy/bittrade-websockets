@@ -16,8 +16,9 @@ rust_decimal = "1.36.0"
 openssl = { version = "0.10", features = ["vendored"] }
 env_logger = "0.11.6"
 # console-subscriber = "0.1.5"
-# tracing = "0.1.26"
+tracing = "0.1.41"
 log = "0.4.25"
 rust_decimal_macros = "1.36.0"
 tempfile = "3.16.0"
 tokio-util = "0.7.13"
+tracing-subscriber = {version="0.3.19", features = ["env-filter", "json"]}
