@@ -3,6 +3,7 @@ use std::{collections::{HashMap, HashSet}, time::Duration};
 use futures::{stream::SplitSink, SinkExt, StreamExt};
 use tokio::{net::TcpStream, select, sync::{broadcast, mpsc, oneshot, watch, RwLock}, task::{JoinHandle, JoinSet}, time::{self, sleep}};
 use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_util::sync::CancellationToken;
 
 use crate::exchanges::{binance::messages::{create_binance_subscription_message, BinancePairMessage}, messages::ExchangePairPrice};
 use crate::websocket::{WebsocketConnectionError, pong_check_interval_task};
@@ -29,6 +30,10 @@ async fn single_websocket_connection(url: &str, registry_receiver: watch::Receiv
     let mut pong_check_interval = time::interval(Duration::from_secs(5));
     // Read messages from the websocket and write to them when instructed. Also keep track of pings/pongs to detect disconnects
     let outcome = select! {
+        _ = listen_to_pairs => {
+            log::error!("Listen to pairs terminated");
+            WebsocketConnectionError::ChannelClosed("Listen to pairs".to_owned())
+        }
         err = async {
             loop {
                 if let Some(message) = read.next().await {
@@ -104,45 +109,26 @@ async fn single_websocket_connection(url: &str, registry_receiver: watch::Receiv
             err
         }
     };
-    listen_to_pairs.abort();
     Err(outcome)
 }
 
 async fn pairs_to_broadcast(mut registry_receiver: watch::Receiver<HashMap<String, mpsc::Sender<ExchangePairPrice>>>, tx: broadcast::Sender<BinancePairMessage>, write_to_websocket_sender: mpsc::Sender<Message>) {
-    let mut set_handle: Option<JoinHandle<Vec<()>>> = None;
+    // TODO actually this should be a child token coming down from manager -> exchange
+    let mut cancellation_token = CancellationToken::new();
     loop {
-        // When the JoinSet is dropped in each loop, all tasks it has spawned will be aborted
         if let Ok(_) = registry_receiver.changed().await {
-            if let Some(handle) = set_handle.take() {
-                handle.abort();
-            }
-            let mut set = JoinSet::new();
+            cancellation_token.cancel();
+            cancellation_token = CancellationToken::new();
             let pairs = registry_receiver.borrow().clone();
             for (pair, sender) in pairs.iter() {
                 // NOTE: Binance doesn't mind that we register multiple times; if they ever do, we'll need to keep new/old value and do a diff
                 log::info!("Bridging pair: {} from Binance to manager", pair);
-                let (mut rx, pair, sender) = (tx.subscribe(), pair.clone(), sender.clone());
-                set.spawn(async move {
-                    log::info!("Spawned task to listen to pair: {}", pair);
-                    loop {
-                        match rx.recv().await {
-                            Ok(m) => {
-                                log::info!("Received message from channel, attempting to match {m:?} {pair}");
-                                if m.pair == *pair {
-                                    let _ = sender.send(m.into()).await;
-                                }
-                            },
-                            Err(_) => break
-                        }
-                    }
-                    log::error!("Channel closed, this should not happen unless we add more pairs");
-                });
+                let (rx, pair, sender, cancellation_token) = (tx.subscribe(), pair.clone(), sender.clone(), cancellation_token.clone());
+                tokio::spawn(create_pair_listener(pair, rx, sender, cancellation_token));
             }
             // Actually send to the websocket
             let _ = after_connection(&pairs.keys().cloned().collect(), &write_to_websocket_sender.clone()).await;
-            // TODO This will block. We won't be notified of new keys being added, thus defeating the purpose of the task set
-            // let _ = set.join_all().await;
-            let _ = set_handle.insert(tokio::spawn(set.join_all()));
+            // let _ = set_handle.insert(tokio::spawn(set.join_all()));
         }
     }
 }
@@ -171,6 +157,29 @@ pub async fn reconnecting_websocket_connection(url: String, pairs_registry_chann
         _ = interrupt => {
             Ok(())
         }
+    }
+}
+
+async fn create_pair_listener(pair: String, mut rx: broadcast::Receiver<BinancePairMessage>, sender: mpsc::Sender<ExchangePairPrice>, cancellation_token: CancellationToken) -> () {
+    select! {
+        _ = cancellation_token.cancelled() => {
+            log::info!("Received cancellation token, stopping listener for pair {pair}");
+        },
+        _ = async {
+            log::info!("Spawned task to listen to pair: {}", pair);
+            loop {
+                match rx.recv().await {
+                    Ok(m) => {
+                        log::info!("Received message from channel, attempting to match {m:?} {pair}");
+                        if m.pair == *pair {
+                            let _ = sender.send(m.into()).await;
+                        }
+                    },
+                    Err(_) => break
+                }
+            }
+            log::error!("Channel closed, this should not happen unless we add more pairs");
+        } => {}
     }
 }
 
