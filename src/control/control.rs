@@ -115,9 +115,8 @@ pub async fn prompt() -> Result<PromptResult, ControlError> {
     // After first loop where we attempt to get the command from the command line arguments, we will clear "args" and just keep prompting the user, unless this is a serve command
     let mut args: Vec<String> = env::args().collect();
     // After first loop we will also stop offering "serve" as an option
-    let mut action_options = [("serve", "Serve", ""), ("add_pair", "Add pair", ""), ("add_key", "Add key", ""), ("remove_key", "Remove key", "")].to_vec();
+    let mut action_options = [("serve", "Serve", ""), ("add_pair", "Add pair", ""), ("remove_pair", "Remove pair", ""), ("add_key", "Add key", ""), ("remove_key", "Remove key", "")].to_vec();
     let mut is_first_loop = true;
-    let mut stream = None;
     loop {
         let action = match args.get(1) {
             Some(action) => action.to_owned(),
@@ -132,66 +131,59 @@ pub async fn prompt() -> Result<PromptResult, ControlError> {
         if action == "serve" {
             return Ok(PromptResult::Serve(get_socket_path()));
         }
-        if stream.is_none() {
-            stream = Some(get_stream().await?);
-        }
-        let stream = stream.as_mut().unwrap();
+        
         // Clear the args vector so we can prompt the user for the action and arguments next time
-        args = Vec::new();
         // Also remove the serve option from the list of options
         if is_first_loop {
             action_options.retain(|(key, _, _)| *key != "serve");
             is_first_loop = false;
         }
-        match action.as_str() {
-        "add_pair" => {
-            let exchange: &str = if args.len() > 1 {
-                let ex: &str = args[2].as_str();
-                match ex {
-                BINANCE | WHITEBIT | KRAKEN | BITFINEX | MEXC | COINBASE | INDEPENDENT_RESERVE => {
-                    ex
-                }
-                _ => {
-                    log::error!("Invalid exchange: {}", ex);
-                    continue;
-                }
-                }
-            } else {
-                select("Select exchange:")
-                .items(&[(BINANCE, "Binance", ""), (WHITEBIT, "Whitebit", ""), (KRAKEN, "Kraken", ""), (BITFINEX, "Bitfinex", ""), (MEXC, "Mexc", ""), (COINBASE, "Coinbase", ""), (INDEPENDENT_RESERVE, "Independent Reserve", "")])
-                .initial_value(BINANCE)
-                .interact()?.into()
-            };
-            let pair = if args.len() > 2 {
-                args[3].to_owned()
-            } else {
-                input("Enter pair:")
-                .default_input("BTC_USDT")
-                .validate(|input: &String| if input.is_empty() { Err("Please provide pair.".to_owned()) } else if !input.contains(PAIR_SEPARATOR) {
-                    let message = format!("Pair must contain separator. {}", PAIR_SEPARATOR);
-                    Err(message)
-                } else {
-                    Ok(())
-                })
-                .interact()?
-            };
-            
-            // Send on the pairs channel
-            let command = ControlCommand::AddPair(exchange.into(), pair);
-            if let Err(err) = send_to_socket(&command, stream).await.map(|_| command) {
-                log::error!("Failed to send command: {}", err);
-                return Err(ControlError::ListenToControlError(err.to_string()));
+        let command = match action.as_str() {
+            "add_pair" => {
+                let exchange = match args.get(2) {
+                    Some(v ) if [BINANCE, WHITEBIT, KRAKEN, MEXC, COINBASE, INDEPENDENT_RESERVE].contains(&v.as_str()) => Some(v.as_str()),
+                    _ => None
+                }.or_else(|| {
+                    select("Select exchange:")
+                    .items(&[(BINANCE, "Binance", ""), (WHITEBIT, "Whitebit", ""), (KRAKEN, "Kraken", ""), (BITFINEX, "Bitfinex", ""), (MEXC, "Mexc", ""), (COINBASE, "Coinbase", ""), (INDEPENDENT_RESERVE, "Independent Reserve", "")])
+                    .initial_value(BINANCE)
+                    .interact().ok()
+                }).unwrap();
+
+                let pair = args.get(3).cloned().or_else(|| {
+                    let from_cli = input("Enter pair:")
+                        .default_input("BTC_USDT")
+                        .validate(|input: &String| if input.is_empty() { Err("Please provide pair.".to_owned()) } else if !input.contains(PAIR_SEPARATOR) {
+                            let message = format!("Pair must contain separator. {}", PAIR_SEPARATOR);
+                            Err(message)
+                        } else {
+                            Ok(())
+                        })
+                        .interact().ok();
+                    from_cli
+                }).unwrap();
+                
+                // Send on the pairs channel
+                ControlCommand::AddPair(exchange.into(), pair)
             }
-        }
-        "add_key" => {
-            log::error!("Add key not implemented yet");
-        }
-        "remove_key" => {
-            log::error!("Remove key not implemented yet");
-        }
-        _ => {
-            log::error!("Unknown action: {}", action);
-        }
+            "add_key" => {
+                log::error!("Add key not implemented yet");
+                continue;
+            }
+            "remove_key" => {
+                log::error!("Remove key not implemented yet");
+                continue;
+            }
+            _ => {
+                log::error!("Unknown action: {}", action);
+                continue;
+            }
+        };
+        let mut stream = get_stream().await.expect("Failed to get stream");
+        args = vec![];
+        if let Err(err) = send_to_socket(&command, &mut stream).await.map(|_| command) {
+            log::error!("Failed to send command: {}", err);
+            return Err(ControlError::ListenToControlError(err.to_string()));
         }
     }
 }
