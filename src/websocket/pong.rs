@@ -7,7 +7,7 @@ use super::errors::WebsocketConnectionError;
 
 
 pub async fn pong_check_interval_task(pong_check_interval: &mut time::Interval, last_pong: &RwLock<tokio::time::Instant>, write_to_socket_sender: &mpsc::Sender<Message>) -> WebsocketConnectionError {
-    // Note: we could have pong_check_interval internal to this function but that would make it harder to test
+    // Note: we could have pong_check_interval internal to this function but that would make it harder to test (?)
     loop {
         pong_check_interval.tick().await;
         let last_pong = last_pong.read().await;

@@ -83,8 +83,11 @@ async fn control_connection(listener: &UnixListener, pairs_sender: mpsc::Sender<
                         }
                     }
                     ControlCommand::RemovePair(exchange, pair) => {
-                        log::info!("Removing pair: {} from exchange: {}", pair, exchange);
-                        // pairs_sender.send((exchange, pair)).await?;
+                        if let Err(err) = pairs_sender.send((exchange, pair)).await {
+                            log::error!("Failed to send pair removal: {}", err);
+                            // At this stage, our internal channel for adding pairs has failed so if the outcome sender which bubbles that information also fails, we're in so much trouble that using expect seems fine.
+                            outcome_sender.send(ControlError::SendPairErrorMpsc(err)).await.expect("Failed to send error");
+                        }
                     }
                     ControlCommand::AddKey(pair, key) => {
                         log::info!("Adding key: {} to pair: {}", key, pair);
@@ -140,31 +143,15 @@ pub async fn prompt() -> Result<PromptResult, ControlError> {
         }
         let command = match action.as_str() {
             "add_pair" => {
-                let exchange = match args.get(2) {
-                    Some(v ) if [BINANCE, WHITEBIT, KRAKEN, MEXC, COINBASE, INDEPENDENT_RESERVE].contains(&v.as_str()) => Some(v.as_str()),
-                    _ => None
-                }.or_else(|| {
-                    select("Select exchange:")
-                    .items(&[(BINANCE, "Binance", ""), (WHITEBIT, "Whitebit", ""), (KRAKEN, "Kraken", ""), (BITFINEX, "Bitfinex", ""), (MEXC, "Mexc", ""), (COINBASE, "Coinbase", ""), (INDEPENDENT_RESERVE, "Independent Reserve", "")])
-                    .initial_value(BINANCE)
-                    .interact().ok()
-                }).unwrap();
-
-                let pair = args.get(3).cloned().or_else(|| {
-                    let from_cli = input("Enter pair:")
-                        .default_input("BTC_USDT")
-                        .validate(|input: &String| if input.is_empty() { Err("Please provide pair.".to_owned()) } else if !input.contains(PAIR_SEPARATOR) {
-                            let message = format!("Pair must contain separator. {}", PAIR_SEPARATOR);
-                            Err(message)
-                        } else {
-                            Ok(())
-                        })
-                        .interact().ok();
-                    from_cli
-                }).unwrap();
-                
+                let exchange = get_exchange(&args);
+                let pair = get_pair(&args);              
                 // Send on the pairs channel
-                ControlCommand::AddPair(exchange.into(), pair)
+                ControlCommand::AddPair(exchange, pair)
+            }
+            "remove_pair" => {
+                let exchange = get_exchange(&args);
+                let pair = get_pair(&args);
+                ControlCommand::RemovePair(exchange, pair)
             }
             "add_key" => {
                 log::error!("Add key not implemented yet");
@@ -234,7 +221,32 @@ async fn send_to_socket(command: &ControlCommand, stream: &mut UnixStream) -> Re
     Ok(())
 }
 
+fn get_exchange(args: &Vec<String>) -> ExchangeName {
+    match args.get(2) {
+        Some(v ) if [BINANCE, WHITEBIT, KRAKEN, MEXC, COINBASE, INDEPENDENT_RESERVE].contains(&v.as_str()) => Some(v.as_str()),
+        _ => None
+    }.or_else(|| {
+        select("Select exchange:")
+        .items(&[(BINANCE, "Binance", ""), (WHITEBIT, "Whitebit", ""), (KRAKEN, "Kraken", ""), (BITFINEX, "Bitfinex", ""), (MEXC, "Mexc", ""), (COINBASE, "Coinbase", ""), (INDEPENDENT_RESERVE, "Independent Reserve", "")])
+        .initial_value(BINANCE)
+        .interact().ok()
+    }).unwrap().into()
+}
 
+fn get_pair(args: &Vec<String>) -> String {
+    args.get(3).cloned().or_else(|| {
+        let from_cli = input("Enter pair:")
+            .default_input("BTC_USDT")
+            .validate(|input: &String| if input.is_empty() { Err("Please provide pair.".to_owned()) } else if !input.contains(PAIR_SEPARATOR) {
+                let message = format!("Pair must contain separator. {}", PAIR_SEPARATOR);
+                Err(message)
+            } else {
+                Ok(())
+            })
+            .interact().ok();
+        from_cli
+    }).unwrap()
+}
 
 pub async fn parse_control_command(stream: Arc<Mutex<UnixStream>>) -> Result<ControlCommand, ControlError> {
     // Read the length of the incoming message (first 4 bytes)

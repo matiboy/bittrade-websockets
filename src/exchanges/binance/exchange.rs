@@ -54,22 +54,22 @@ impl BinanceExchange {
         }
     }
 
-    // pub async fn remove_pair(&mut self, pair: &String) -> () {
-    //     let pair = self.get_exchange_matching_pair(pair);
-    //     let mut pairs = self.pairs_receiver.borrow().clone();
-    //     if !pairs.contains(&pair) {
-    //         log::info!("Pair {} does not exist", pair);
-    //         return;
-    //     }
-    //     // Remove the pair from the list
-    //     pairs.remove(&pair);
-    //     if pairs.is_empty() {
-    //         self.stop_public();
-    //         return;
-    //     }
-    //     // TODO If this fails this should terminate the exchange and force it to restart
-    //     self.pairs_sender.send(pairs).expect("Failed to send new pairs");
-    // }
+    pub async fn remove_pair(&mut self, pair: &String) -> () {
+        let matching_pair = self.get_exchange_matching_pair(pair);
+        let mut pairs = self.pairs_receiver.borrow().clone();
+        if !pairs.contains_key(&matching_pair) {
+            log::info!("Pair {} does not exist", pair);
+            return;
+        }
+        // Remove the pair from the list
+        pairs.remove(&matching_pair);
+        if pairs.is_empty() {
+            self.stop_public();
+            return;
+        }
+        // TODO If this fails this should terminate the exchange and force it to restart
+        self.pairs_sender.send(pairs).expect("Failed to send new pairs");
+    }
 
     fn stop_public(&mut self) {
         // NOTE: .take puts None in place
