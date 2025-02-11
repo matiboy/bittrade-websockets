@@ -124,7 +124,6 @@ async fn pairs_to_broadcast(mut registry_receiver: watch::Receiver<HashMap<Strin
                     loop {
                         match rx.recv().await {
                             Ok(m) => {
-                                log::info!("Received message from channel, attempting to match {m:?} {pair}");
                                 log::debug!("Received message from channel, attempting to match {m:?} {pair}");
                                 if m.pair == *pair {
                                     let _ = sender.send(m.into()).await;

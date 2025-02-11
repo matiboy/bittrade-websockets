@@ -29,6 +29,7 @@ impl ExchangeHandler {
                         let mut last_value = (0., 0.);
                         loop {
                             if let Some(pair_price) = manager_receiver.recv().await {
+                                log::debug!("Received pair price to be kept: {pair_price:?}");
                                 if (pair_price.ask, pair_price.bid) == last_value {
                                     continue;
                                 }

@@ -42,7 +42,7 @@ impl BinanceExchange {
         }
         // Add the pair to the list
         current_pairs.insert(exchange_pair.clone(), sender);
-        // TODO: We should detect this and what, recreate the exchange?
+        // TODO: We should detect when this fails and what, recreate the exchange?
         self.pairs_sender.send(current_pairs).expect("Failed to send new pairs");
         if self.public_websocket_interrupt.is_none() {
             let pairs_receiver = self.pairs_receiver.clone();

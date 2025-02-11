@@ -43,10 +43,6 @@ impl ExchangeManager {
             log::warn!("Pair {pair} already exists for exchange {exchange_name}");
             return;
         }
-        // Initially the exchanges are None and we only create them when we need to add a pair
-        // TODO Is this the right way to look at it? Should we create the exchanges when we start the manager? And they can decide for themselves whether to run their websocket(s) or not
-        // TODO Binance currently can return the matching pair but other exchanges might not be so simple
-        // Create a channel that will be dedicated to this pair
         let (messages_sender, messages_receiver) = mpsc::channel(1024);
         let path = get_socket_name(&exchange_name, &pair);
         let handler = ExchangeHandler::bridge(path, messages_receiver).await;
